@@ -207,7 +207,16 @@ def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) ->
             width = len(preview[0]) if preview else len(headers)
             labels = headers[:width] + [f"Column {index}" for index in range(len(headers) + 1, width + 1)]
             labels = [label or f"Column {index + 1}" for index, label in enumerate(labels[:width])]
-            preview_frame = pd.DataFrame(preview, columns=labels)
+            # Flipkart templates commonly repeat long instructional headers.
+            # Pandas/Arrow require unique display labels even though the source
+            # Excel columns themselves must remain unchanged.
+            label_counts: dict[str, int] = {}
+            unique_labels: list[str] = []
+            for label in labels:
+                count = label_counts.get(label, 0) + 1
+                label_counts[label] = count
+                unique_labels.append(label if count == 1 else f"{label} ({count})")
+            preview_frame = pd.DataFrame(preview, columns=unique_labels)
             st.dataframe(preview_frame, use_container_width=True, hide_index=True)
         st.caption(
             "The preview is read-only. Price, image, SKU, identifiers, variation fields, and all unrecognized columns are treated as locked."
