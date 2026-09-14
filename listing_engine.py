@@ -22,7 +22,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 
 
@@ -473,7 +474,6 @@ def _sheet_profile(ws: Any) -> dict[str, Any]:
                 "bullet_number": column.bullet_number,
             }
             for column in columns
-            if column.header or column.role
         ],
         "content_fields": content_fields,
         "locked_fields": locked_fields,
@@ -488,10 +488,155 @@ def _sheet_profile(ws: Any) -> dict[str, Any]:
     }
 
 
+def _xls_colour(book: Any, colour_index: Any) -> str | None:
+    """Convert a legacy BIFF palette colour to an openpyxl ARGB value."""
+
+    try:
+        colour = book.colour_map.get(colour_index)
+        if not colour:
+            return None
+        red, green, blue = colour
+        return f"FF{int(red):02X}{int(green):02X}{int(blue):02X}"
+    except Exception:
+        return None
+
+
+def _convert_xls_to_xlsx(data: bytes) -> bytes:
+    """Convert legacy BIFF .xls bytes to a safe editable .xlsx workbook.
+
+    openpyxl cannot read BIFF files.  xlrd is used only for the legacy input
+    path, and the conversion retains sheet names, values, merged ranges,
+    basic number formats, widths/heights, visibility, and common cell styles.
+    The generated output is intentionally .xlsx because writing a fully
+    structure-preserving .xls file is not supported by openpyxl.
+    """
+
+    try:
+        import xlrd
+    except ImportError as exc:  # pragma: no cover - dependency is in requirements
+        raise ValueError("Legacy .xls support requires the xlrd dependency.") from exc
+
+    try:
+        try:
+            legacy = xlrd.open_workbook(file_contents=data, formatting_info=True)
+        except Exception:
+            # Some BIFF files contain incomplete formatting records.  Values
+            # are still recoverable with formatting_info disabled.
+            legacy = xlrd.open_workbook(file_contents=data, formatting_info=False)
+    except Exception as exc:
+        raise ValueError(f"Could not read legacy .xls workbook: {exc}") from exc
+
+    converted = Workbook()
+    default_sheet = converted.active
+    converted.remove(default_sheet)
+    for sheet_index in range(legacy.nsheets):
+        legacy_sheet = legacy.sheet_by_index(sheet_index)
+        worksheet = converted.create_sheet(legacy_sheet.name[:31] or f"Sheet{sheet_index + 1}")
+        visibility = getattr(legacy_sheet, "visibility", 0)
+        if visibility == 1:
+            worksheet.sheet_state = "hidden"
+        elif visibility == 2:
+            worksheet.sheet_state = "veryHidden"
+
+        for row_number in range(legacy_sheet.nrows):
+            row_info = getattr(legacy_sheet, "rowinfo_map", {}).get(row_number)
+            if row_info is not None:
+                if getattr(row_info, "height", 0):
+                    worksheet.row_dimensions[row_number + 1].height = row_info.height / 20
+                if getattr(row_info, "hidden", False):
+                    worksheet.row_dimensions[row_number + 1].hidden = True
+            for col_number in range(legacy_sheet.ncols):
+                source_cell = legacy_sheet.cell(row_number, col_number)
+                target = worksheet.cell(row=row_number + 1, column=col_number + 1)
+                value = source_cell.value
+                if source_cell.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        value = xlrd.xldate_as_datetime(source_cell.value, legacy.datemode)
+                    except Exception:
+                        value = source_cell.value
+                elif source_cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                    value = bool(source_cell.value)
+                elif source_cell.ctype == xlrd.XL_CELL_NUMBER and isinstance(value, float) and value.is_integer():
+                    value = int(value)
+                elif source_cell.ctype == xlrd.XL_CELL_ERROR:
+                    value = f"#ERROR {source_cell.value}"
+                elif source_cell.ctype in {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}:
+                    value = None
+                target.value = value
+
+                # Preserve common BIFF formatting where the source exposes it.
+                try:
+                    xf_index = legacy_sheet.cell_xf_index(row_number, col_number)
+                    xf = legacy.xf_list[xf_index]
+                    if getattr(xf, "format_key", None) in getattr(legacy, "format_map", {}):
+                        target.number_format = legacy.format_map[xf.format_key].format_str
+                    font_info = legacy.font_list[xf.font_index]
+                    underline = "single" if getattr(font_info, "underlined", False) else None
+                    target.font = Font(
+                        name=getattr(font_info, "name", "Calibri") or "Calibri",
+                        sz=(getattr(font_info, "height", 220) or 220) / 20,
+                        bold=bool(getattr(font_info, "bold", False)),
+                        italic=bool(getattr(font_info, "italic", False)),
+                        underline=underline,
+                        color=_xls_colour(legacy, getattr(font_info, "colour_index", None)),
+                    )
+                    alignment = getattr(xf, "alignment", None)
+                    if alignment is not None:
+                        target.alignment = Alignment(
+                            horizontal=getattr(alignment, "hor_align", None) or None,
+                            vertical=getattr(alignment, "vert_align", None) or None,
+                            wrap_text=bool(getattr(alignment, "wrap_text", False)),
+                        )
+                    border_info = getattr(xf, "border", None)
+                    if border_info is not None:
+                        def side(name: str) -> Side:
+                            item = getattr(border_info, name, None)
+                            return Side(
+                                style=getattr(item, "line_style", None) if item else None,
+                                color=_xls_colour(legacy, getattr(item, "colour_index", None)) if item else None,
+                            )
+                        target.border = Border(
+                            left=side("left_line"),
+                            right=side("right_line"),
+                            top=side("top_line"),
+                            bottom=side("bottom_line"),
+                        )
+                except Exception:
+                    # A malformed/unsupported BIFF style should not prevent
+                    # the workbook from being accepted; its value remains safe.
+                    pass
+
+        for col_number, col_info in getattr(legacy_sheet, "colinfo_map", {}).items():
+            if col_number >= 256:
+                continue
+            if getattr(col_info, "width", 0):
+                worksheet.column_dimensions[get_column_letter(col_number + 1)].width = col_info.width / 256
+            if getattr(col_info, "hidden", False):
+                worksheet.column_dimensions[get_column_letter(col_number + 1)].hidden = True
+        for merged in getattr(legacy_sheet, "merged_cells", []):
+            try:
+                row_start, row_end, col_start, col_end = merged
+                worksheet.merge_cells(
+                    start_row=row_start + 1,
+                    end_row=row_end,
+                    start_column=col_start + 1,
+                    end_column=col_end,
+                )
+            except Exception:
+                pass
+
+    output = io.BytesIO()
+    converted.save(output)
+    return output.getvalue()
+
+
 def open_source_workbook(data: bytes, filename: str):
     extension = Path(filename).suffix.lower()
+    if extension == ".xls":
+        data = _convert_xls_to_xlsx(data)
+        extension = ".xlsx"
     if extension not in {".xlsx", ".xlsm"}:
-        raise ValueError("Only .xlsx and .xlsm workbooks are supported. Please save .xls files as .xlsx first.")
+        raise ValueError("Supported workbook formats are .xlsx, .xlsm, and legacy .xls (converted to .xlsx).")
     return load_workbook(
         io.BytesIO(data),
         data_only=False,
@@ -513,6 +658,8 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "sheets": sheets,
             "recommended_sheet": recommended_sheet,
             "macro_enabled": Path(filename).suffix.lower() == ".xlsm",
+            "legacy_xls_converted": Path(filename).suffix.lower() == ".xls",
+            "output_extension": ".xlsx" if Path(filename).suffix.lower() == ".xls" else Path(filename).suffix.lower(),
             "error": None,
         }
     except Exception as exc:  # surfaced in the UI with the filename context
@@ -523,6 +670,8 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "sheets": [],
             "recommended_sheet": None,
             "macro_enabled": False,
+            "legacy_xls_converted": Path(filename).suffix.lower() == ".xls",
+            "output_extension": ".xlsx" if Path(filename).suffix.lower() == ".xls" else Path(filename).suffix.lower(),
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -689,7 +838,7 @@ def inspect_sku_source(
     if data:
         try:
             extension = Path(filename).suffix.lower()
-            if extension in {".xlsx", ".xlsm"}:
+            if extension in {".xlsx", ".xlsm", ".xls"}:
                 file_values, file_duplicates = _extract_skus_from_workbook(data, filename)
             elif extension in {".csv", ".tsv"}:
                 file_values, file_duplicates = _extract_skus_from_csv_text(_decode_text(data))
@@ -766,7 +915,7 @@ def inspect_image_link_zip(data: bytes | None, filename: str = "") -> dict[str, 
                 raw = archive.read(info)
                 member_links: list[str] = []
                 kind = "binary"
-                if extension in {".xlsx", ".xlsm"}:
+                if extension in {".xlsx", ".xlsm", ".xls"}:
                     kind = "workbook"
                     try:
                         member_links = _extract_urls_from_workbook_bytes(raw, member_name)
@@ -1717,6 +1866,9 @@ def _safe_filename_part(value: str) -> str:
 def customer_filename(platform: str, customer_number: int, source_filename: str) -> str:
     source = Path(source_filename)
     extension = source.suffix.lower() if source.suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
+    # Legacy BIFF files are accepted and converted to xlsx before editing.
+    if source.suffix.lower() == ".xls":
+        extension = ".xlsx"
     stem = _safe_filename_part(source.stem)
     return f"{_safe_filename_part(platform)}_Customer_{customer_number:02d}_{stem}{extension}"
 
@@ -1734,6 +1886,10 @@ def generate_customer_workbook(
     filename = customer_filename(platform, customer_number, source_filename)
     warnings: list[str] = []
     errors: list[str] = []
+    if Path(source_filename).suffix.lower() == ".xls":
+        warnings.append(
+            "Legacy .xls master accepted and converted to .xlsx for safe editing. Values, sheets, merged cells, and common formatting are carried forward; review legacy-only features manually."
+        )
     try:
         source_wb = open_source_workbook(source_data, source_filename)
         selected_name = sheet_name or source_wb.active.title
@@ -1823,6 +1979,7 @@ def generate_customer_workbook(
                 "customer_number": customer_number,
                 "platform": platform,
                 "source_filename": source_filename,
+                "source_extension": Path(source_filename).suffix.lower(),
                 "output_filename": filename,
                 "data_sheet": selected_name,
                 "header_row": check_output_header,

@@ -7,7 +7,7 @@ A Streamlit workspace for producing **40 separate, validated customer workbooks*
 - 10 Flipkart files
 - 10 Snapdeal files
 
-The app is upload-first by design. Each platform receives its own current Demo/Ready `.xlsx` or `.xlsm` master. It inspects that workbook independently and never uses an older product workbook, a filename, or another platform's structure as a template.
+The app is upload-first by design. Each platform receives its own current Demo/Ready master (`.xlsx`/`.xlsm`; Flipkart also accepts legacy `.xls`). It inspects that workbook independently and never uses an older product workbook, a filename, or another platform's structure as a template.
 
 ## What it does
 
@@ -35,7 +35,7 @@ The application listens on Streamlit's default port `8501`. For the Arena previe
 streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
-Legacy `.xls` files are not accepted because preserving their original workbook structure requires a different writer. Save them as `.xlsx` before upload.
+Flipkart legacy `.xls` files are accepted. Because openpyxl cannot write the old BIFF format safely, the app converts `.xls` to `.xlsx` before editing while carrying forward values, sheets, merged cells, common formatting, widths/heights, and visibility. Generated Flipkart files from a `.xls` source are therefore `.xlsx`; review any legacy-only features manually.
 
 ## Validation notes
 

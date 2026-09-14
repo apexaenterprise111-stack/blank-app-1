@@ -143,6 +143,10 @@ def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) ->
             help="Only this sheet receives approved content edits. Every other sheet is preserved.",
         )
         selected = next(sheet for sheet in profile["sheets"] if sheet["name"] == chosen)
+        if uploaded.name.lower().endswith(".xls"):
+            st.warning(
+                "Legacy .xls accepted. It will be converted to .xlsx for safe editing; review any legacy-only workbook features after export."
+            )
         identity = ", ".join(selected.get("product_identities", [])) or "Not detected"
         content = ", ".join(selected.get("content_fields", [])) or "None detected"
         groups = ", ".join(selected.get("group_values", [])[:8]) or "Not detected"
@@ -242,12 +246,17 @@ card_columns = st.columns(2)
 for index, platform in enumerate(PLATFORMS):
     with card_columns[index % 2]:
         st.markdown(f'<div class="upload-card"><span class="platform-chip">{platform}</span><h4>Current {platform} master</h4>', unsafe_allow_html=True)
+        accepted_types = ["xlsx", "xlsm"]
+        upload_help = "Accepted formats: .xlsx and .xlsm."
+        if platform == "Flipkart":
+            accepted_types.append("xls")
+            upload_help = "Flipkart .xls, .xlsx, and .xlsm are accepted. Legacy .xls files are converted to .xlsx for safe editing."
         uploads[platform] = st.file_uploader(
             f"Upload {platform} workbook",
-            type=["xlsx", "xlsm"],
+            type=accepted_types,
             key=f"upload_{platform}",
             label_visibility="collapsed",
-            help="Accepted formats: .xlsx and .xlsm. Save legacy .xls files as .xlsx first.",
+            help=upload_help,
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -268,9 +277,9 @@ with reference_columns[0]:
     st.markdown("**SKU input**")
     sku_upload = st.file_uploader(
         "SKU file",
-        type=["xlsx", "xlsm", "csv", "tsv", "txt"],
+        type=["xlsx", "xlsm", "xls", "csv", "tsv", "txt"],
         key="sku_input_file",
-        help="Upload a SKU workbook/CSV/TXT, or paste one SKU per line below.",
+        help="Upload a SKU workbook/CSV/TXT, including legacy .xls, or paste one SKU per line below.",
     )
     pasted_skus = st.text_area(
         "Paste SKU values",
