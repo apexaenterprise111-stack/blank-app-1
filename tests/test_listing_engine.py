@@ -1,10 +1,18 @@
 from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 import unittest
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from listing_engine import generate_customer_workbook, inspect_workbook
+from listing_engine import (
+    generate_customer_workbook,
+    inspect_image_link_zip,
+    inspect_sku_source,
+    inspect_workbook,
+    validate_external_inputs,
+    PLATFORMS,
+)
 
 
 class ListingEngineTests(unittest.TestCase):
@@ -92,6 +100,33 @@ class ListingEngineTests(unittest.TestCase):
         self.assertTrue(result.success, result.errors)
         output = load_workbook(BytesIO(result.data))
         self.assertNotIn("KSHTABHANJAN", output["Flipkart"]["D2"].value.upper())
+
+    def test_external_sku_and_image_zip_are_validation_only(self):
+        source = self.master_bytes()
+        sku_input = inspect_sku_source(pasted_text="P1\nC1")
+        self.assertEqual(sku_input["values"], ["P1", "C1"])
+
+        image_zip = BytesIO()
+        with ZipFile(image_zip, "w", ZIP_DEFLATED) as archive:
+            archive.writestr("links.txt", "https://example/1.jpg\nhttps://example/2.jpg")
+        image_input = inspect_image_link_zip(image_zip.getvalue(), "links.zip")
+        self.assertTrue(image_input["ok"])
+        self.assertEqual(image_input["link_count"], 2)
+
+        report = validate_external_inputs(
+            {
+                platform: {
+                    "data": source,
+                    "filename": f"{platform}.xlsx",
+                    "sheet_name": "Catalog",
+                }
+                for platform in PLATFORMS
+            },
+            sku_input["values"],
+            image_input["links"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertTrue(all(item["status"] == "matched" for item in report["platforms"]))
 
 
 if __name__ == "__main__":

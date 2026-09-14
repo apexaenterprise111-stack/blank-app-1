@@ -535,6 +535,433 @@ def sheet_profile(profile: Mapping[str, Any], sheet_name: str | None) -> Mapping
     return profile.get("sheets", [None])[0] if profile.get("sheets") else None
 
 
+
+# ---------------------------------------------------------------------------
+# Operator-provided SKU and image-link inputs
+# ---------------------------------------------------------------------------
+
+_SKU_HEADER_NAMES = {
+    "sku",
+    "sku id",
+    "seller sku",
+    "seller sku id",
+    "child sku",
+    "parent sku",
+    "parent sku id",
+    "sku code",
+    "product sku",
+}
+_TEXT_MEMBER_EXTENSIONS = {
+    ".txt",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".url",
+    ".list",
+    ".links",
+    ".md",
+    ".xml",
+    ".html",
+    ".htm",
+}
+_IMAGE_MEMBER_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
+
+def _sku_key(value: Any) -> str:
+    return re.sub(r"\s+", " ", display_value(value)).strip().casefold()
+
+
+def _clean_sku_candidate(value: Any) -> str:
+    text = display_value(value).strip().strip("\"'` ")
+    if not text or text.startswith("http://") or text.startswith("https://"):
+        return ""
+    # Accept convenient pasted forms such as "SKU: ABC-01" without changing
+    # the actual SKU stored in the workbook.
+    if ":" in text and normalize_header(text.split(":", 1)[0]) in _SKU_HEADER_NAMES:
+        text = text.split(":", 1)[1].strip()
+    if normalize_header(text) in _SKU_HEADER_NAMES or normalize_header(text) in {
+        "sku number",
+        "sku numbers",
+        "product sku list",
+    }:
+        return ""
+    return text.strip(" ,;|\t")
+
+
+def parse_sku_text(text: str) -> tuple[list[str], list[str]]:
+    """Parse pasted SKU values without applying them to any workbook cell."""
+
+    values: list[str] = []
+    duplicates: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            cells = next(csv.reader([line], delimiter="\t")) if "\t" in line else next(csv.reader([line]))
+        except (csv.Error, StopIteration):
+            cells = [line]
+        # A semicolon-delimited paste is common in spreadsheet exports.
+        expanded: list[str] = []
+        for cell in cells:
+            expanded.extend(cell.split(";") if ";" in cell else [cell])
+        for cell in expanded:
+            candidate = _clean_sku_candidate(cell)
+            if not candidate:
+                continue
+            key = _sku_key(candidate)
+            if key in seen:
+                duplicates.append(candidate)
+            else:
+                seen.add(key)
+                values.append(candidate)
+    return values, duplicates
+
+
+def _decode_text(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return ""
+
+
+def _extract_skus_from_csv_text(text: str) -> tuple[list[str], list[str]]:
+    try:
+        rows = list(csv.reader(io.StringIO(text)))
+    except csv.Error:
+        return parse_sku_text(text)
+    if not rows:
+        return [], []
+    header_indices = [
+        index
+        for index, value in enumerate(rows[0])
+        if normalize_header(value) in _SKU_HEADER_NAMES or "sku" in normalize_header(value)
+    ]
+    source_rows = rows[1:] if header_indices else rows
+    candidates: list[str] = []
+    for row in source_rows:
+        cells = [row[index] for index in header_indices if index < len(row)] if header_indices else row
+        candidates.extend(cells)
+    return parse_sku_text("\n".join(candidates))
+
+
+def _extract_skus_from_workbook(data: bytes, filename: str) -> tuple[list[str], list[str]]:
+    workbook = open_source_workbook(data, filename)
+    candidates: list[str] = []
+    for worksheet in workbook.worksheets:
+        header_row = find_header_row(worksheet)
+        if header_row is not None:
+            columns = _sheet_columns(worksheet, header_row)
+            sku_columns = [
+                column for column in columns if column.role in {"sku", "parent_sku"}
+            ]
+            rows = data_rows(worksheet, header_row)
+            if sku_columns:
+                for row in rows:
+                    candidates.extend(
+                        worksheet.cell(row=row, column=column.index).value
+                        for column in sku_columns
+                    )
+                continue
+        # A raw one-column workbook without headers is still a valid SKU list.
+        for row in worksheet.iter_rows():
+            candidates.extend(cell.value for cell in row)
+    return parse_sku_text("\n".join(display_value(value) for value in candidates))
+
+
+def inspect_sku_source(
+    data: bytes | None = None,
+    filename: str = "",
+    pasted_text: str = "",
+) -> dict[str, Any]:
+    """Inspect an operator SKU file and/or pasted SKU list.
+
+    This source is deliberately validation-only.  The generation engine never
+    writes these values back into a master workbook.
+    """
+
+    values: list[str] = []
+    duplicates: list[str] = []
+    errors: list[str] = []
+    if data:
+        try:
+            extension = Path(filename).suffix.lower()
+            if extension in {".xlsx", ".xlsm"}:
+                file_values, file_duplicates = _extract_skus_from_workbook(data, filename)
+            elif extension in {".csv", ".tsv"}:
+                file_values, file_duplicates = _extract_skus_from_csv_text(_decode_text(data))
+            else:
+                file_values, file_duplicates = parse_sku_text(_decode_text(data))
+            values.extend(file_values)
+            duplicates.extend(file_duplicates)
+        except Exception as exc:
+            errors.append(f"Could not read SKU source: {type(exc).__name__}: {exc}")
+    pasted_values, pasted_duplicates = parse_sku_text(pasted_text)
+    values.extend(pasted_values)
+    duplicates.extend(pasted_duplicates)
+
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = _sku_key(value)
+        if key in seen:
+            duplicates.append(value)
+        elif key:
+            seen.add(key)
+            unique.append(value)
+    return {
+        "filename": filename or "Pasted SKU input",
+        "values": unique,
+        "duplicates": _unique_text(duplicates, limit=50),
+        "count": len(unique),
+        "errors": errors,
+        "ok": bool(unique) and not errors,
+    }
+
+
+def _extract_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.findall(r"https?://[^\s<>\"']+", text or "", flags=re.IGNORECASE):
+        value = match.rstrip(".,;:)]}>\"")
+        if value and value not in urls:
+            urls.append(value)
+    return urls
+
+
+def _extract_urls_from_workbook_bytes(data: bytes, filename: str) -> list[str]:
+    workbook = open_source_workbook(data, filename)
+    urls: list[str] = []
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows():
+            for cell in row:
+                urls.extend(_extract_urls(display_value(cell.value)))
+    return list(dict.fromkeys(urls))
+
+
+def inspect_image_link_zip(data: bytes | None, filename: str = "") -> dict[str, Any]:
+    """Read URLs from a supplied ZIP without changing workbook image cells."""
+
+    if not data:
+        return {
+            "filename": filename,
+            "links": [],
+            "members": [],
+            "image_file_count": 0,
+            "error": "No image-link ZIP was supplied.",
+            "ok": False,
+        }
+    links: list[str] = []
+    members: list[dict[str, Any]] = []
+    image_file_count = 0
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                member_name = info.filename
+                extension = Path(member_name).suffix.lower()
+                raw = archive.read(info)
+                member_links: list[str] = []
+                kind = "binary"
+                if extension in {".xlsx", ".xlsm"}:
+                    kind = "workbook"
+                    try:
+                        member_links = _extract_urls_from_workbook_bytes(raw, member_name)
+                    except Exception:
+                        member_links = []
+                elif extension in _IMAGE_MEMBER_EXTENSIONS:
+                    image_file_count += 1
+                    kind = "image file"
+                elif extension in _TEXT_MEMBER_EXTENSIONS or b"http://" in raw or b"https://" in raw:
+                    kind = "link text"
+                    decoded = _decode_text(raw)
+                    member_links = _extract_urls(decoded)
+                links.extend(member_links)
+                members.append(
+                    {
+                        "member": member_name,
+                        "kind": kind,
+                        "bytes": info.file_size,
+                        "link_count": len(member_links),
+                        "sample_links": member_links[:3],
+                    }
+                )
+        links = list(dict.fromkeys(links))
+        return {
+            "filename": filename,
+            "links": links,
+            "members": members,
+            "image_file_count": image_file_count,
+            "link_count": len(links),
+            "error": None,
+            "ok": bool(links),
+        }
+    except (zipfile.BadZipFile, OSError) as exc:
+        return {
+            "filename": filename,
+            "links": [],
+            "members": [],
+            "image_file_count": 0,
+            "link_count": 0,
+            "error": f"Could not read image-link ZIP: {type(exc).__name__}: {exc}",
+            "ok": False,
+        }
+
+
+def _workbook_locked_inputs(
+    data: bytes,
+    filename: str,
+    sheet_name: str,
+) -> dict[str, Any]:
+    workbook = open_source_workbook(data, filename)
+    if sheet_name not in workbook.sheetnames:
+        raise ValueError(f"Sheet '{sheet_name}' was not found.")
+    worksheet = workbook[sheet_name]
+    header_row = find_header_row(worksheet)
+    if header_row is None:
+        raise ValueError("No header row was detected.")
+    columns = _sheet_columns(worksheet, header_row)
+    rows = data_rows(worksheet, header_row)
+    by_role = _columns_by_role(columns)
+    sku_values: list[str] = []
+    for role in ("sku", "parent_sku"):
+        for column in by_role.get(role, []):
+            sku_values.extend(
+                _clean_sku_candidate(worksheet.cell(row=row, column=column.index).value)
+                for row in rows
+            )
+    image_values: list[str] = []
+    image_headers: list[str] = []
+    for column in by_role.get("image", []):
+        image_headers.append(column.header)
+        for row in rows:
+            image_values.extend(_extract_urls(display_value(worksheet.cell(row=row, column=column.index).value)))
+    return {
+        "sku_values": list(dict.fromkeys(value for value in sku_values if value)),
+        "image_links": list(dict.fromkeys(image_values)),
+        "image_headers": image_headers,
+    }
+
+
+def _set_keys(values: Iterable[str]) -> set[str]:
+    return {_sku_key(value) for value in values if _sku_key(value)}
+
+
+def validate_external_inputs(
+    platform_sources: Mapping[str, Mapping[str, Any]],
+    sku_values: Sequence[str],
+    image_links: Sequence[str],
+) -> dict[str, Any]:
+    """Cross-check external SKU/link packages against locked master cells."""
+
+    report: dict[str, Any] = {
+        "sku_input_count": len(sku_values),
+        "image_input_count": len(image_links),
+        "platforms": [],
+        "errors": [],
+        "warnings": [],
+        "ok": True,
+    }
+    supplied_skus = _set_keys(sku_values)
+    supplied_images = set(image_links)
+    for platform in PLATFORMS:
+        source = platform_sources.get(platform, {})
+        try:
+            locked = _workbook_locked_inputs(
+                source["data"],
+                source["filename"],
+                source["sheet_name"],
+            )
+            workbook_skus = _set_keys(locked["sku_values"])
+            workbook_images = set(locked["image_links"])
+            sku_missing = sorted(supplied_skus - workbook_skus)
+            sku_workbook_only = sorted(workbook_skus - supplied_skus)
+            image_missing = sorted(supplied_images - workbook_images)
+            image_workbook_only = sorted(workbook_images - supplied_images)
+            platform_report = {
+                "platform": platform,
+                "sheet_name": source["sheet_name"],
+                "workbook_sku_count": len(workbook_skus),
+                "workbook_image_count": len(workbook_images),
+                "image_headers": locked["image_headers"],
+                "matched_skus": len(supplied_skus & workbook_skus),
+                "sku_missing_from_workbook": sku_missing,
+                "sku_present_only_in_workbook": sku_workbook_only,
+                "matched_images": len(supplied_images & workbook_images),
+                "image_links_missing_from_workbook": image_missing,
+                "image_links_present_only_in_workbook": image_workbook_only,
+                "sku_status": "matched" if not sku_missing else "review",
+                "image_status": "matched" if not image_missing else "review",
+                "status": "matched" if not sku_missing and not image_missing else "review",
+                "error": None,
+            }
+            if sku_missing:
+                report["warnings"].append(
+                    f"{platform}: {len(sku_missing)} supplied SKU(s) were not found in locked workbook SKU cells."
+                )
+            if image_missing:
+                report["warnings"].append(
+                    f"{platform}: {len(image_missing)} supplied image link(s) were not found in locked image-link cells."
+                )
+            if not locked["sku_values"]:
+                report["warnings"].append(f"{platform}: no SKU column values were detected in the selected sheet.")
+            if not locked["image_links"]:
+                report["warnings"].append(
+                    f"{platform}: no HTTP image URLs were detected in image columns; supplied links are not written automatically."
+                )
+        except Exception as exc:
+            platform_report = {
+                "platform": platform,
+                "sheet_name": source.get("sheet_name", ""),
+                "workbook_sku_count": 0,
+                "workbook_image_count": 0,
+                "matched_skus": 0,
+                "matched_images": 0,
+                "sku_missing_from_workbook": [],
+                "sku_present_only_in_workbook": [],
+                "image_links_missing_from_workbook": [],
+                "image_links_present_only_in_workbook": [],
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            report["errors"].append(f"{platform}: {platform_report['error']}")
+        report["platforms"].append(platform_report)
+    report["ok"] = not report["errors"]
+    return report
+
+
+def format_external_validation_report(report: Mapping[str, Any]) -> str:
+    lines = [
+        "Marketplace Listing Studio — external input validation",
+        "",
+        "SKU input is validation-only; no SKU cells are overwritten.",
+        "Image-link ZIP input is validation-only; no image URL or order is overwritten.",
+        f"Supplied unique SKUs: {report.get('sku_input_count', 0)}",
+        f"Supplied unique image links: {report.get('image_input_count', 0)}",
+        "",
+    ]
+    for item in report.get("platforms", []):
+        lines.append(
+            f"{item.get('platform', '')} | {item.get('status', 'unknown')} | "
+            f"matched SKU(s): {item.get('matched_skus', 0)} | matched image link(s): {item.get('matched_images', 0)}"
+        )
+        if item.get("error"):
+            lines.append(f"  Error: {item['error']}")
+        if item.get("sku_missing_from_workbook"):
+            lines.append(f"  SKU not in workbook: {', '.join(item['sku_missing_from_workbook'][:20])}")
+        if item.get("image_links_missing_from_workbook"):
+            lines.append(
+                f"  Image links not in workbook: {len(item['image_links_missing_from_workbook'])}"
+            )
+    for warning in report.get("warnings", []):
+        lines.append(f"Warning: {warning}")
+    for error in report.get("errors", []):
+        lines.append(f"Error: {error}")
+    return "\n".join(lines)
+
 # ---------------------------------------------------------------------------
 # Group ordering and fact extraction
 # ---------------------------------------------------------------------------
@@ -1448,6 +1875,8 @@ def build_manifest(records: Sequence[Mapping[str, Any]]) -> bytes:
         "status",
         "warnings",
         "errors",
+        "sku_validation",
+        "image_validation",
     ]
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=fields)
@@ -1461,8 +1890,9 @@ def build_export_zip(
     results: Sequence[GenerationResult],
     manifest_records: Sequence[Mapping[str, Any]],
     filename: str = "marketplace_listing_40_files.zip",
+    external_validation_report: str | None = None,
 ) -> bytes:
-    """Package only validated workbooks plus a machine-readable manifest."""
+    """Package validated workbooks plus workbook and external-input QA reports."""
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1470,6 +1900,11 @@ def build_export_zip(
             if result.success and result.data:
                 archive.writestr(result.filename, result.data)
         archive.writestr("manifest.csv", build_manifest(manifest_records))
+        if external_validation_report:
+            archive.writestr(
+                "external_input_validation.txt",
+                external_validation_report.encode("utf-8"),
+            )
         qa_lines = [
             "Marketplace Listing Studio — strict QA report",
             "",

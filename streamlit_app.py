@@ -17,8 +17,12 @@ from listing_engine import (
     PLATFORMS,
     build_export_zip,
     build_manifest,
+    format_external_validation_report,
     generate_customer_workbook,
+    inspect_image_link_zip,
+    inspect_sku_source,
     inspect_workbook,
+    validate_external_inputs,
 )
 
 
@@ -78,7 +82,14 @@ def cached_inspection(data: bytes, filename: str) -> dict[str, Any]:
     return inspect_workbook(data, filename)
 
 
-def _platform_records(results: list[Any]) -> list[dict[str, Any]]:
+def _platform_records(
+    results: list[Any],
+    external_report: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    external_by_platform = {
+        item.get("platform"): item
+        for item in (external_report or {}).get("platforms", [])
+    }
     records: list[dict[str, Any]] = []
     for result in results:
         report = result.report or {}
@@ -96,6 +107,8 @@ def _platform_records(results: list[Any]) -> list[dict[str, Any]]:
                 "status": "PASS" if result.success else "FAIL",
                 "warnings": " | ".join(result.warnings),
                 "errors": " | ".join(result.errors),
+                "sku_validation": external_by_platform.get(result.platform, {}).get("sku_status", "not checked"),
+                "image_validation": external_by_platform.get(result.platform, {}).get("image_status", "not checked"),
             }
         )
     return records
@@ -175,12 +188,14 @@ def _render_sidebar() -> tuple[str, bool, str]:
         st.caption("4 platforms · 10 customer versions · one protected master per platform")
         st.divider()
         st.markdown("**Workflow**")
-        st.markdown("1. Upload the current master workbooks  \n2. Inspect each detected structure  \n3. Generate and validate 40 copies  \n4. Download the ZIP and QA manifest")
+        st.markdown("1. Upload four current master workbooks  \n2. Add SKU input and image-link ZIP  \n3. Inspect each detected structure  \n4. Generate and validate 40 copies  \n5. Download the ZIP and QA manifest")
         st.divider()
         st.markdown("**Strict master safeguards**")
         st.checkbox("Fail closed if locked data changes", value=True, disabled=True)
         st.checkbox("Preserve .xlsm format and VBA", value=True, disabled=True)
         st.checkbox("Keep source images and URLs unchanged", value=True, disabled=True)
+        st.checkbox("Use SKU input for validation only", value=True, disabled=True)
+        st.checkbox("Use image-link ZIP for validation only", value=True, disabled=True)
         st.divider()
         st.caption("No old product template is used. Each platform is inspected independently from the file you upload.")
     with st.expander("Optional confirmed facts", expanded=False):
@@ -243,8 +258,68 @@ metric_columns[1].metric("Customer files", "40")
 metric_columns[2].metric("Per platform", "10")
 metric_columns[3].metric("Locked by default", "All other fields")
 
+st.markdown('<div class="section-label">01A · Add locked reference inputs</div>', unsafe_allow_html=True)
+st.markdown(
+    '<p class="section-note">Provide the SKU list and image-link ZIP you want checked against the four masters. These inputs are validation-only: the tool never replaces SKU cells or image URLs.</p>',
+    unsafe_allow_html=True,
+)
+reference_columns = st.columns(2)
+with reference_columns[0]:
+    st.markdown("**SKU input**")
+    sku_upload = st.file_uploader(
+        "SKU file",
+        type=["xlsx", "xlsm", "csv", "tsv", "txt"],
+        key="sku_input_file",
+        help="Upload a SKU workbook/CSV/TXT, or paste one SKU per line below.",
+    )
+    pasted_skus = st.text_area(
+        "Paste SKU values",
+        key="pasted_sku_values",
+        placeholder="Paste one SKU per line, or separate values with commas",
+        height=96,
+    )
+with reference_columns[1]:
+    st.markdown("**Image-link ZIP**")
+    image_link_zip = st.file_uploader(
+        "ZIP containing image links",
+        type=["zip"],
+        key="image_link_zip",
+        help="The ZIP may contain TXT/CSV/JSON/link files or a workbook containing HTTP image URLs.",
+    )
+    st.caption("Existing image links in each master remain the protected source of truth. The ZIP is checked, never copied over them.")
+
+sku_input = inspect_sku_source(
+    sku_upload.getvalue() if sku_upload else None,
+    sku_upload.name if sku_upload else "",
+    pasted_text=pasted_skus,
+)
+image_input = inspect_image_link_zip(
+    image_link_zip.getvalue() if image_link_zip else None,
+    image_link_zip.name if image_link_zip else "",
+)
+reference_status = st.columns(2)
+if sku_input.get("ok"):
+    reference_status[0].success(f"SKU input ready · {sku_input['count']} unique SKU(s)")
+else:
+    reference_status[0].info("SKU input pending · upload a file or paste at least one SKU")
+    for error in sku_input.get("errors", []):
+        reference_status[0].error(error)
+if image_input.get("ok"):
+    reference_status[1].success(
+        f"Image-link ZIP ready · {image_input.get('link_count', 0)} unique link(s) · {len(image_input.get('members', []))} member(s)"
+    )
+else:
+    reference_status[1].info("Image-link ZIP pending · provide a ZIP containing readable image URLs")
+    if image_input.get("error") and image_link_zip:
+        reference_status[1].error(image_input["error"])
+
 # Clear old output when any source workbook changes.
 signature = tuple((platform, _source_signature(uploads[platform])) for platform in PLATFORMS)
+reference_signature = (
+    _source_signature(sku_upload),
+    _source_signature(image_link_zip),
+    hashlib.sha256((pasted_skus or "").encode("utf-8")).hexdigest()[:16],
+)
 if st.session_state.get("source_signature") != signature:
     st.session_state["source_signature"] = signature
     st.session_state.pop("generation_results", None)
@@ -272,10 +347,47 @@ else:
     st.markdown('<div class="section-label">01 · Upload four current masters</div>', unsafe_allow_html=True)
     st.markdown('<p class="section-note">Nothing is generated until all four current Demo/Ready workbooks are present and inspectable.</p>', unsafe_allow_html=True)
 
+external_report: dict[str, Any] = {}
+external_sources_ready = bool(sku_input.get("ok") and image_input.get("ok"))
+if external_sources_ready and len(chosen_sheets) == 4 and all(chosen_sheets.get(platform) for platform in PLATFORMS):
+    external_report = validate_external_inputs(
+        {
+            platform: {
+                "data": uploads[platform].getvalue(),
+                "filename": uploads[platform].name,
+                "sheet_name": chosen_sheets[platform],
+            }
+            for platform in PLATFORMS
+        },
+        sku_input["values"],
+        image_input["links"],
+    )
+    with st.expander("Reference-input cross-check", expanded=True):
+        st.caption("Mismatches are review warnings only. The generated workbook still keeps every source SKU and image field unchanged.")
+        crosscheck_rows = []
+        for item in external_report.get("platforms", []):
+            crosscheck_rows.append(
+                {
+                    "Platform": item.get("platform"),
+                    "Status": item.get("status"),
+                    "SKU matched": item.get("matched_skus", 0),
+                    "SKU in workbook": item.get("workbook_sku_count", 0),
+                    "Images matched": item.get("matched_images", 0),
+                    "Images in workbook": item.get("workbook_image_count", 0),
+                }
+            )
+        if crosscheck_rows:
+            st.dataframe(pd.DataFrame(crosscheck_rows), use_container_width=True, hide_index=True)
+        for warning in external_report.get("warnings", []):
+            st.warning(warning)
+        for error in external_report.get("errors", []):
+            st.error(error)
+
 # A changed sheet choice or confirmed-facts brief is a new generation input;
 # never leave a stale ZIP visible after either changes.
 configuration_signature = (
     signature,
+    reference_signature,
     tuple((platform, chosen_sheets.get(platform)) for platform in PLATFORMS),
     confirmed_context,
 )
@@ -290,9 +402,20 @@ st.markdown('<div class="section-label">02 · Generate, validate, export</div>',
 st.markdown('<p class="section-note">Every customer copy is re-opened after saving. If a locked value, validation rule, formula, image relationship, sheet, header, or identifier changes, that workbook fails closed.</p>', unsafe_allow_html=True)
 
 invalid_profiles = [platform for platform, profile in profiles.items() if profile.get("error")]
-ready = loaded == 4 and len(profiles) == 4 and not invalid_profiles and all(chosen_sheets.get(platform) for platform in PLATFORMS)
+ready = (
+    loaded == 4
+    and len(profiles) == 4
+    and not invalid_profiles
+    and all(chosen_sheets.get(platform) for platform in PLATFORMS)
+    and external_sources_ready
+    and bool(external_report.get("ok"))
+)
 if invalid_profiles:
     st.warning("Fix the workbook inspection errors before generating: " + ", ".join(invalid_profiles) + ".")
+if not external_sources_ready:
+    st.info("Upload a SKU source and an image-link ZIP before generating. Both are locked reference inputs and will be validated without overwriting the masters.")
+elif external_report and not external_report.get("ok"):
+    st.error("Reference-input validation could not complete. Fix the reported input error before generating.")
 
 if st.button("Generate and validate all 40 files", type="primary", disabled=not ready, use_container_width=True):
     all_results: list[Any] = []
@@ -322,12 +445,17 @@ if st.button("Generate and validate all 40 files", type="primary", disabled=not 
         if platform_failed:
             failed_platforms.append(platform)
 
-    records = _platform_records(all_results)
+    records = _platform_records(all_results, external_report)
     passed = sum(result.success for result in all_results)
     st.session_state["generation_results"] = all_results
     st.session_state["manifest_records"] = records
+    external_validation_text = format_external_validation_report(external_report)
     if passed == 40:
-        st.session_state["export_zip"] = build_export_zip(all_results, records)
+        st.session_state["export_zip"] = build_export_zip(
+            all_results,
+            records,
+            external_validation_report=external_validation_text,
+        )
         platform_zips: dict[str, bytes] = {}
         for platform in PLATFORMS:
             platform_results = [result for result in all_results if result.platform == platform]
@@ -335,6 +463,7 @@ if st.button("Generate and validate all 40 files", type="primary", disabled=not 
                 platform_results,
                 [record for record in records if record["platform"] == platform],
                 filename=f"{platform.lower()}_customer_files.zip",
+                external_validation_report=external_validation_text,
             )
         st.session_state["platform_zips"] = platform_zips
         status_box.success("All 40 customer workbooks passed strict validation.")
@@ -372,7 +501,7 @@ if results:
     records = st.session_state.get("manifest_records", [])
     if records:
         frame = pd.DataFrame(records)
-        visible_columns = ["platform", "customer", "output_file", "data_sheet", "groups", "rows", "changed_cells", "reordered_groups", "status"]
+        visible_columns = ["platform", "customer", "output_file", "data_sheet", "groups", "rows", "changed_cells", "reordered_groups", "sku_validation", "image_validation", "status"]
         st.dataframe(frame[visible_columns], use_container_width=True, hide_index=True)
         st.download_button(
             "Download QA manifest (CSV)",

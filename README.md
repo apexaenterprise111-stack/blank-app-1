@@ -12,12 +12,13 @@ The app is upload-first by design. Each platform receives its own current Demo/R
 ## What it does
 
 1. **Inspects before editing** — sheet names, header row, product identity, groups, content columns, formulas, merged ranges, and data-validation counts are shown before generation.
-2. **Writes only approved listing fields** — detected Title, Description, Keyword/Search Keyword, and Bullet columns. Unrecognized columns are treated as locked.
-3. **Keeps master data protected** — price fields, images/image URLs, SKUs, IDs, size/color/pack/variation data, brand, style codes, formulas, dropdowns, sheet names, and formatting are not regenerated.
-4. **Normalizes group order safely** — numeric groups are kept together; Amazon parent/child rows remain together. Embedded-image or merged-body layouts are not reordered when doing so could break image mapping; the app reports that manual review is needed.
-5. **Creates deterministic unique copy** — ten title, description, keyword, and bullet variants are generated from confirmed workbook facts only. Unsupported material, fit, color, pack, or feature claims are not invented.
-6. **Validates after saving** — every serialized workbook is re-opened and checked for sheet structure, headers, formulas, data validations, merged ranges, image relationships, and all non-content/locked values. A failed file is excluded from the all-files ZIP.
-7. **Exports safely** — a ZIP contains separate customer workbooks, `manifest.csv`, and `validation_report.txt`. `.xlsm` masters remain `.xlsm` and are loaded with VBA preservation enabled.
+2. **Accepts locked reference inputs** — upload a SKU workbook/CSV/TXT or paste SKUs, then upload a ZIP containing image-link text/CSV/JSON files or a workbook of links. The tool cross-checks both inputs against every platform master.
+3. **Writes only approved listing fields** — detected Title, Description, Keyword/Search Keyword, and Bullet columns. Unrecognized columns are treated as locked.
+4. **Keeps master data protected** — price fields, images/image URLs, SKUs, IDs, size/color/pack/variation data, brand, style codes, formulas, dropdowns, sheet names, and formatting are not regenerated. External SKU/image inputs are validation-only and are never copied over existing cells.
+5. **Normalizes group order safely** — numeric groups are kept together; Amazon parent/child rows remain together. Embedded-image or merged-body layouts are not reordered when doing so could break image mapping; the app reports that manual review is needed.
+6. **Creates deterministic unique copy** — ten title, description, keyword, and bullet variants are generated from confirmed workbook facts only. Unsupported material, fit, color, pack, or feature claims are not invented.
+7. **Validates after saving** — every serialized workbook is re-opened and checked for sheet structure, headers, formulas, data validations, merged ranges, image relationships, and all non-content/locked values. A failed file is excluded from the all-files ZIP.
+8. **Exports safely** — a ZIP contains separate customer workbooks, `manifest.csv`, `validation_report.txt`, and `external_input_validation.txt`. `.xlsm` masters remain `.xlsm` and are loaded with VBA preservation enabled.
 
 Flipkart descriptions also remove the explicitly prohibited `KSHTABHANJAN` string while leaving locked Brand/Product Name cells untouched.
 
