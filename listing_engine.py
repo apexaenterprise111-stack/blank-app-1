@@ -543,7 +543,8 @@ def _convert_xls_to_xlsx(data: bytes) -> bytes:
     converted.remove(default_sheet)
     for sheet_index in range(legacy.nsheets):
         legacy_sheet = legacy.sheet_by_index(sheet_index)
-        worksheet = converted.create_sheet(legacy_sheet.name[:31] or f"Sheet{sheet_index + 1}")
+        safe_sheet_name, _ = _sanitize_cell_text(legacy_sheet.name)
+        worksheet = converted.create_sheet(str(safe_sheet_name)[:31] or f"Sheet{sheet_index + 1}")
         visibility = getattr(legacy_sheet, "visibility", 0)
         if visibility == 1:
             worksheet.sheet_state = "hidden"
@@ -574,6 +575,7 @@ def _convert_xls_to_xlsx(data: bytes) -> bytes:
                     value = f"#ERROR {source_cell.value}"
                 elif source_cell.ctype in {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}:
                     value = None
+                value, _ = _sanitize_cell_text(value)
                 target.value = value
 
                 # Preserve common BIFF formatting where the source exposes it.
@@ -643,6 +645,16 @@ def _convert_xls_to_xlsx(data: bytes) -> bytes:
 
 
 _ILLEGAL_XML_BYTES_RE = re.compile(rb"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+_ILLEGAL_XML_TEXT_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
+def _sanitize_cell_text(value: Any) -> tuple[Any, int]:
+    """Normalize invalid XML control characters before openpyxl receives text."""
+
+    if not isinstance(value, str):
+        return value, 0
+    cleaned, count = _ILLEGAL_XML_TEXT_RE.subn(" ", value)
+    return cleaned, count
 
 
 def _sanitize_ooxml_workbook(data: bytes, filename: str) -> tuple[bytes, dict[str, Any]]:
@@ -702,7 +714,8 @@ def _convert_xlsb_to_xlsx(data: bytes, filename: str) -> bytes:
     converted.remove(converted.active)
     used_names: set[str] = set()
     for sheet_name, frame in sheets.items():
-        base_name = re.sub(r"[\\/*?:\[\]]", "_", str(sheet_name))[:31] or "Sheet"
+        safe_sheet_name, _ = _sanitize_cell_text(str(sheet_name))
+        base_name = re.sub(r"[\\/*?:\[\]]", "_", str(safe_sheet_name))[:31] or "Sheet"
         name = base_name
         suffix = 1
         while name in used_names:
@@ -723,6 +736,7 @@ def _convert_xlsb_to_xlsx(data: bytes, filename: str) -> bytes:
                         value = value.item()
                     except Exception:
                         pass
+                value, _ = _sanitize_cell_text(value)
                 worksheet.cell(row=row_number, column=col_number).value = value
 
     output = io.BytesIO()
