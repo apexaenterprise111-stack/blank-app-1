@@ -1,4 +1,4 @@
-"""Streamlit front end for the four-platform listing studio.
+"""Streamlit front end for the selected-platform listing studio.
 
 The app is intentionally upload-first: each platform gets its own current
 master workbook, and every generated copy is validated against that same
@@ -120,11 +120,18 @@ def _sheet_option(profile: dict[str, Any]) -> tuple[list[str], str | None]:
     return names, profile.get("recommended_sheet") or (names[0] if names else None)
 
 
-def _automatic_master_mapping(files: list[Any]) -> tuple[dict[str, int], list[str], str | None]:
-    """Infer platform files from names, leaving ambiguous files selectable."""
+def _automatic_master_mapping(
+    files: list[Any],
+    inspected_profiles: dict[int, dict[str, Any]] | None = None,
+) -> tuple[dict[str, int], list[int], str | None]:
+    """Infer platform files from names and template headers.
 
-    if len(files) != 4:
-        return {}, list(PLATFORMS), None
+    Filename matching is preferred. Header clues are used for generic files,
+    which is important for templates named only with a product/style name.
+    """
+
+    if not 1 <= len(files) <= len(PLATFORMS):
+        return {}, list(range(len(files))), None
     names = [str(file.name).casefold().replace("_", " ").replace("-", " ") for file in files]
     aliases = {
         "Amazon": ("amazon", "amz"),
@@ -132,23 +139,71 @@ def _automatic_master_mapping(files: list[Any]) -> tuple[dict[str, int], list[st
         "Flipkart": ("flipkart", "flip kart"),
         "Snapdeal": ("snapdeal", "snap deal", "snapdeal ready"),
     }
+
+    def header_scores(profile: dict[str, Any]) -> dict[str, int]:
+        headers = " ".join(
+            str(column.get("header", "")).casefold()
+            for sheet in profile.get("sheets", [])
+            for column in sheet.get("columns", [])
+        )
+        clues = {
+            # Count only platform-specific template clues here. Generic fields
+            # such as Product Name, bullets, and Search Keywords are shared by
+            # many portals and must fall through to explicit mapping.
+            "Amazon": (("parentage", 6), ("variation theme", 7), ("generic keyword", 6), ("parent sku", 5)),
+            "Meesho": (("product id", 6), ("style id", 6), ("sku id", 5)),
+            "Flipkart": (("seller sku id", 7), ("parent variant fsn", 7), ("brand size", 5), ("other details", 4)),
+            "Snapdeal": (("offer group", 12), ("sku code", 10), ("style code name", 5), ("ean upc", 4)),
+        }
+        return {platform: sum(weight for clue, weight in pairs if clue in headers) for platform, pairs in clues.items()}
+
     mapping: dict[str, int] = {}
     used: set[int] = set()
-    for platform in PLATFORMS:
-        candidates = [
-            index
-            for index, name in enumerate(names)
-            if index not in used and any(alias in name for alias in aliases[platform])
+    # 1) Prefer filenames containing exactly one platform's aliases. A name
+    # containing multiple portal names remains manually selectable.
+    for index, name in enumerate(names):
+        matches = [
+            platform
+            for platform in PLATFORMS
+            if any(alias in name for alias in aliases[platform])
         ]
-        if len(candidates) == 1:
-            mapping[platform] = candidates[0]
-            used.add(candidates[0])
-    unresolved = [platform for platform in PLATFORMS if platform not in mapping]
-    if not mapping and len(files) == 4:
-        # If all four files have generic names, use the upload order as a
-        # usable default and show the operator the resulting mapping.
-        return dict(zip(PLATFORMS, range(4))), [], "No platform names were found; upload order was used: Amazon, Meesho, Flipkart, Snapdeal."
-    return mapping, unresolved, None
+        if len(matches) == 1 and matches[0] not in mapping:
+            mapping[matches[0]] = index
+            used.add(index)
+
+    # 2) Resolve generic filenames from the actual workbook template headers.
+    # Only a clearly strongest, platform-specific score is accepted; otherwise
+    # the operator gets a platform selector instead of a risky guess.
+    if inspected_profiles:
+        while True:
+            candidates: list[tuple[int, int, str, int]] = []
+            for index, profile in inspected_profiles.items():
+                if index in used:
+                    continue
+                scores = {
+                    platform: score
+                    for platform, score in header_scores(profile).items()
+                    if platform not in mapping
+                }
+                ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+                if not ranked or ranked[0][1] < 5:
+                    continue
+                best_platform, best_score = ranked[0]
+                second_score = ranked[1][1] if len(ranked) > 1 else 0
+                if best_score > second_score + 2:
+                    candidates.append((best_score, best_score - second_score, best_platform, index))
+            if not candidates:
+                break
+            _, _, platform, index = max(candidates)
+            mapping[platform] = index
+            used.add(index)
+
+    unassigned_files = [index for index in range(len(files)) if index not in used]
+    if unassigned_files:
+        note = "Some platform names were not detected; choose a platform for each remaining workbook below."
+    else:
+        note = None
+    return mapping, unassigned_files, note
 
 
 def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) -> str | None:
@@ -234,10 +289,10 @@ def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) ->
 def _render_sidebar() -> tuple[str, bool, str]:
     with st.sidebar:
         st.markdown("### Listing Forge")
-        st.caption("4 platforms · 10 customer versions · one protected master per platform")
+        st.caption("1–4 platforms · 10 customer versions per uploaded master · protected source files")
         st.divider()
         st.markdown("**Workflow**")
-        st.markdown("1. Upload four current master workbooks  \n2. Add the SKU and image-link inputs  \n3. Inspect each detected structure and locked data  \n4. Generate and validate 40 copies  \n5. Download the ZIP and QA manifest")
+        st.markdown("1. Upload one to four current master workbooks  \n2. Add the SKU and image-link inputs  \n3. Inspect each detected structure and locked data  \n4. Generate and validate the selected platform copies  \n5. Download the ZIP and QA manifest")
         st.divider()
         st.markdown("**Strict master safeguards**")
         st.checkbox("Fail closed if locked data changes", value=True, disabled=True)
@@ -272,64 +327,63 @@ st.markdown(
     <div class="hero">
       <div>
         <div class="eyebrow">Marketplace content operations</div>
-        <h1>One master workbook.<br>Forty upload-ready listings.</h1>
-        <p>Generate ten genuinely different customer versions for Amazon, Meesho, Flipkart, and Snapdeal while protecting the current product workbook as the source of truth.</p>
+        <h1>One upload.<br>Platform-ready listings.</h1>
+        <p>Upload any one to four platform masters and generate ten genuinely different customer versions for each uploaded portal while protecting the current product workbook as the source of truth.</p>
       </div>
-      <div class="hero-mark"><span class="big">4 × 10</span><span class="small">strictly validated</span></div>
+      <div class="hero-mark"><span class="big">1–4 × 10</span><span class="small">strictly validated</span></div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown(
-    '<div class="rule-card"><strong>Current Excel first.</strong> Upload all four current Demo/Ready workbooks in the single master input box. The app reads each product identity, sheet names, headers, dropdowns, groups, variations, and locked data before writing only detected Title, Description, Keyword, and Bullet fields.</div>',
+    '<div class="rule-card"><strong>Current Excel first.</strong> Upload one to four current Demo/Ready workbooks in the single master input box. The output set will contain listings only for the platforms you actually upload.</div>',
     unsafe_allow_html=True,
 )
 
-st.markdown("**Demo Excel input · one upload box for all four portals**")
+st.markdown("**Demo Excel input · one upload box for the supported portals**")
 master_files = st.file_uploader(
     "Upload Amazon, Meesho, Flipkart, and Snapdeal Demo/Ready Excel files",
     type=list(SUPPORTED_WORKBOOK_EXTENSIONS),
     accept_multiple_files=True,
     key="all_master_workbooks",
-    help="Select all four platform workbooks in this one box. Platform names are detected from filenames; if names are generic, upload order is used or you can map them below.",
+    help="Select one to four platform workbooks in this one box. Platform names are detected from filenames/template headers; if names are generic, you can map them below.",
 )
 uploads: dict[str, Any] = {platform: None for platform in PLATFORMS}
-master_mapping_ready = len(master_files) == 4
+master_mapping_ready = 1 <= len(master_files) <= len(PLATFORMS)
 if not master_files:
-    st.info("Upload exactly four Demo/Ready Excel files in the single master input box.")
-elif len(master_files) != 4:
+    st.info("Upload at least one Demo/Ready Excel file in the single master input box.")
+elif len(master_files) > len(PLATFORMS):
     master_mapping_ready = False
-    st.warning(f"{len(master_files)} master file(s) uploaded. Exactly 4 are required: Amazon, Meesho, Flipkart, and Snapdeal.")
+    st.warning(f"{len(master_files)} master file(s) uploaded. Upload a maximum of {len(PLATFORMS)} platform files.")
 else:
-    automatic_mapping, unresolved_platforms, mapping_note = _automatic_master_mapping(master_files)
+    inspected_upload_profiles = {
+        index: cached_inspection(file.getvalue(), file.name)
+        for index, file in enumerate(master_files)
+    }
+    automatic_mapping, unassigned_files, mapping_note = _automatic_master_mapping(
+        master_files,
+        inspected_upload_profiles,
+    )
     if mapping_note:
         st.info(mapping_note)
     for platform, index in automatic_mapping.items():
         uploads[platform] = master_files[index]
-    if unresolved_platforms:
-        st.warning("Some filenames do not identify their platform. Confirm the mapping before generating.")
-        available_options = {
-            index: f"{index + 1}. {file.name}"
-            for index, file in enumerate(master_files)
-        }
-        chosen_indices = set(automatic_mapping.values())
-        for platform in unresolved_platforms:
-            choices = [
-                (index, label)
-                for index, label in available_options.items()
-                if index not in chosen_indices
+    if unassigned_files:
+        st.warning("Some workbooks need a platform choice before generation. Missing platforms do not need to be uploaded.")
+        for file_index in unassigned_files:
+            uploaded_file = master_files[file_index]
+            available_platforms = [
+                platform for platform in PLATFORMS if uploads[platform] is None
             ]
-            labels = ["Select a Demo/Ready workbook"] + [label for _, label in choices]
-            selected_label = st.selectbox(
-                f"{platform} workbook",
+            labels = ["Select a platform"] + available_platforms
+            selected_platform = st.selectbox(
+                f"Platform for {uploaded_file.name}",
                 labels,
-                key=f"master_mapping_{platform}",
+                key=f"master_mapping_file_{file_index}",
             )
-            if selected_label != labels[0]:
-                selected_index = next(index for index, label in choices if label == selected_label)
-                uploads[platform] = master_files[selected_index]
-                chosen_indices.add(selected_index)
+            if selected_platform != labels[0]:
+                uploads[selected_platform] = uploaded_file
             else:
                 master_mapping_ready = False
     mapping_rows = [
@@ -337,13 +391,14 @@ else:
         for platform in PLATFORMS
     ]
     st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
-    master_mapping_ready = master_mapping_ready and all(uploads.values())
+    master_mapping_ready = master_mapping_ready and sum(upload is not None for upload in uploads.values()) == len(master_files)
 
 loaded = sum(upload is not None for upload in uploads.values())
+active_platforms = [platform for platform in PLATFORMS if uploads[platform] is not None]
 metric_columns = st.columns(4)
-metric_columns[0].metric("Masters mapped", f"{loaded}/4")
-metric_columns[1].metric("Customer files", "40")
-metric_columns[2].metric("Per platform", "10")
+metric_columns[0].metric("Masters mapped", f"{loaded}/{len(master_files)}")
+metric_columns[1].metric("Customer files", loaded * 10)
+metric_columns[2].metric("Active portals", loaded)
 metric_columns[3].metric("Locked by default", "All other fields")
 
 st.markdown('<div class="section-label">01A · Add locked reference inputs</div>', unsafe_allow_html=True)
@@ -357,7 +412,7 @@ pasted_skus = st.text_area(
     key="pasted_sku_values",
     placeholder="Paste one SKU per line, or separate multiple SKUs with commas",
     height=130,
-    help="Enter the SKU values that should be checked against the four master workbooks.",
+    help="Enter the SKU values that should be checked against each uploaded master workbook.",
 )
 st.caption("SKU is used for validation only. Existing SKU cells and image URLs from the master Excel are never overwritten.")
 
@@ -411,22 +466,19 @@ chosen_sheets: dict[str, str | None] = {}
 if loaded:
     st.markdown('<div class="section-label">01 · Inspect current masters</div>', unsafe_allow_html=True)
     st.markdown('<p class="section-note">The product identity shown below comes from each uploaded workbook—not from a filename, old template, or other platform.</p>', unsafe_allow_html=True)
-    for platform in PLATFORMS:
+    for platform in active_platforms:
         upload = uploads[platform]
-        if upload is None:
-            st.info(f"Upload the current {platform} master to continue.")
-            continue
         raw = upload.getvalue()
         profile = cached_inspection(raw, upload.name)
         profiles[platform] = profile
         chosen_sheets[platform] = _render_inspection(platform, upload, profile)
 else:
-    st.markdown('<div class="section-label">01 · Upload four current masters</div>', unsafe_allow_html=True)
-    st.markdown('<p class="section-note">Nothing is generated until all four current Demo/Ready workbooks are present and inspectable.</p>', unsafe_allow_html=True)
+    st.markdown('<div class="section-label">01 · Upload selected platform masters</div>', unsafe_allow_html=True)
+    st.markdown('<p class="section-note">Upload one or more current Demo/Ready workbooks. Only the uploaded platforms will receive output files.</p>', unsafe_allow_html=True)
 
 external_report: dict[str, Any] = {}
 external_sources_ready = bool(sku_input.get("ok") and image_input.get("ok"))
-if external_sources_ready and len(chosen_sheets) == 4 and all(chosen_sheets.get(platform) for platform in PLATFORMS):
+if external_sources_ready and active_platforms and len(chosen_sheets) == len(active_platforms) and all(chosen_sheets.get(platform) for platform in active_platforms):
     external_report = validate_external_inputs(
         {
             platform: {
@@ -434,7 +486,7 @@ if external_sources_ready and len(chosen_sheets) == 4 and all(chosen_sheets.get(
                 "filename": uploads[platform].name,
                 "sheet_name": chosen_sheets[platform],
             }
-            for platform in PLATFORMS
+            for platform in active_platforms
         },
         sku_input["values"],
         image_input["links"],
@@ -480,10 +532,11 @@ st.markdown('<p class="section-note">Every customer copy is re-opened after savi
 invalid_profiles = [platform for platform, profile in profiles.items() if profile.get("error")]
 ready = (
     master_mapping_ready
-    and loaded == 4
-    and len(profiles) == 4
+    and bool(active_platforms)
+    and loaded == len(active_platforms)
+    and len(profiles) == len(active_platforms)
     and not invalid_profiles
-    and all(chosen_sheets.get(platform) for platform in PLATFORMS)
+    and all(chosen_sheets.get(platform) for platform in active_platforms)
     and external_sources_ready
     and bool(external_report.get("ok"))
 )
@@ -494,14 +547,15 @@ if not external_sources_ready:
 elif external_report and not external_report.get("ok"):
     st.error("Reference-input validation could not complete. Fix the reported input error before generating.")
 
-if st.button("Generate and validate all 40 files", type="primary", disabled=not ready, use_container_width=True):
+expected_files = len(active_platforms) * 10
+if st.button(f"Generate and validate {expected_files} files", type="primary", disabled=not ready, use_container_width=True):
     all_results: list[Any] = []
     progress = st.progress(0, text="Starting strict workbook checks…")
     status_box = st.empty()
     failed_platforms: list[str] = []
-    total_steps = len(PLATFORMS) * 10
+    total_steps = expected_files
     completed = 0
-    for platform in PLATFORMS:
+    for platform in active_platforms:
         upload = uploads[platform]
         platform_failed = False
         for customer_number in range(1, 11):
@@ -527,14 +581,15 @@ if st.button("Generate and validate all 40 files", type="primary", disabled=not 
     st.session_state["generation_results"] = all_results
     st.session_state["manifest_records"] = records
     external_validation_text = format_external_validation_report(external_report)
-    if passed == 40:
+    if passed == expected_files:
         st.session_state["export_zip"] = build_export_zip(
             all_results,
             records,
+            filename=f"marketplace_listing_{expected_files}_files.zip",
             external_validation_report=external_validation_text,
         )
         platform_zips: dict[str, bytes] = {}
-        for platform in PLATFORMS:
+        for platform in active_platforms:
             platform_results = [result for result in all_results if result.platform == platform]
             platform_zips[platform] = build_export_zip(
                 platform_results,
@@ -543,9 +598,9 @@ if st.button("Generate and validate all 40 files", type="primary", disabled=not 
                 external_validation_report=external_validation_text,
             )
         st.session_state["platform_zips"] = platform_zips
-        status_box.success("All 40 customer workbooks passed strict validation.")
+        status_box.success(f"All {expected_files} customer workbooks passed strict validation.")
     else:
-        status_box.error(f"{passed} of 40 workbooks passed. No all-files ZIP was created; review the failed workbooks below.")
+        status_box.error(f"{passed} of {expected_files} workbooks passed. No all-files ZIP was created; review the failed workbooks below.")
         if failed_platforms:
             st.warning("Platforms with at least one failed customer copy: " + ", ".join(failed_platforms))
 
@@ -553,18 +608,19 @@ results = st.session_state.get("generation_results", [])
 if results:
     passed = sum(result.success for result in results)
     st.markdown('<div class="section-label">03 · QA results and downloads</div>', unsafe_allow_html=True)
-    if passed == 40:
-        st.markdown('<div class="qa-pass"><strong>40/40 passed.</strong> Locked fields and workbook structure were preserved. The ZIP contains 40 separate customer files, a manifest, and a validation report.</div>', unsafe_allow_html=True)
-        download_columns = st.columns([2, 1, 1, 1, 1])
+    expected_files = len(active_platforms) * 10
+    if passed == expected_files:
+        st.markdown(f'<div class="qa-pass"><strong>{expected_files}/{expected_files} passed.</strong> Locked fields and workbook structure were preserved. The ZIP contains one customer set for each uploaded platform.</div>', unsafe_allow_html=True)
+        download_columns = st.columns([2] + [1] * len(active_platforms))
         download_columns[0].download_button(
-            "Download all 40 files",
+            f"Download all {expected_files} files",
             data=st.session_state["export_zip"],
-            file_name="marketplace_listing_40_files.zip",
+            file_name=f"marketplace_listing_{expected_files}_files.zip",
             mime="application/zip",
             type="primary",
             use_container_width=True,
         )
-        for index, platform in enumerate(PLATFORMS, start=1):
+        for index, platform in enumerate(active_platforms, start=1):
             download_columns[index].download_button(
                 f"{platform} ZIP",
                 data=st.session_state["platform_zips"][platform],
@@ -573,7 +629,7 @@ if results:
                 use_container_width=True,
             )
     else:
-        st.markdown(f'<div class="qa-fail"><strong>{passed}/40 passed.</strong> Failed files are not included in an all-files download. Correct the source workbook or review the specific QA errors below, then regenerate.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="qa-fail"><strong>{passed}/{expected_files} passed.</strong> Failed files are not included in an all-files download. Correct the source workbook or review the specific QA errors below, then regenerate.</div>', unsafe_allow_html=True)
 
     records = st.session_state.get("manifest_records", [])
     if records:

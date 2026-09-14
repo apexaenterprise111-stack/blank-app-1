@@ -161,6 +161,23 @@ class ListingEngineTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertTrue(all(item["status"] == "matched" for item in report["platforms"]))
 
+    def test_external_validation_only_checks_uploaded_platforms(self):
+        source = self.master_bytes()
+        report = validate_external_inputs(
+            {
+                "Snapdeal": {
+                    "data": source,
+                    "filename": "generic-snapdeal.xlsx",
+                    "sheet_name": "Catalog",
+                }
+            },
+            ["P1", "C1", "P2", "C2"],
+            ["https://example/1.jpg", "https://example/2.jpg"],
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual([item["platform"] for item in report["platforms"]], ["Snapdeal"])
+        self.assertNotIn("Amazon", {item["platform"] for item in report["platforms"]})
+
 
 if __name__ == "__main__":
     unittest.main()

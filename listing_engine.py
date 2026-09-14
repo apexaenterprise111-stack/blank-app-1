@@ -1215,7 +1215,11 @@ def validate_external_inputs(
     }
     supplied_skus = _set_keys(sku_values)
     supplied_images = set(image_links)
-    for platform in PLATFORMS:
+    # Validate only the platform workbooks the operator uploaded. Missing
+    # portals are intentionally not errors; the output set mirrors the input
+    # set (one platform produces 10 files, three platforms produce 30, etc.).
+    active_platforms = [platform for platform in PLATFORMS if platform in platform_sources]
+    for platform in active_platforms:
         source = platform_sources.get(platform, {})
         try:
             locked = _workbook_locked_inputs(
@@ -2251,7 +2255,7 @@ def build_manifest(records: Sequence[Mapping[str, Any]]) -> bytes:
 def build_export_zip(
     results: Sequence[GenerationResult],
     manifest_records: Sequence[Mapping[str, Any]],
-    filename: str = "marketplace_listing_40_files.zip",
+    filename: str = "marketplace_listing_files.zip",
     external_validation_report: str | None = None,
 ) -> bytes:
     """Package validated workbooks plus workbook and external-input QA reports."""

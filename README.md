@@ -1,13 +1,13 @@
-# Listing Forge — 4 × 10 Marketplace Listing Studio
+# Listing Forge — 1–4 × 10 Marketplace Listing Studio
 
-A Streamlit workspace for producing **40 separate, validated customer workbooks**:
+A Streamlit workspace for producing **10 validated customer workbooks per uploaded platform** (up to 40 total):
 
-- 10 Amazon files
-- 10 Meesho files
-- 10 Flipkart files
-- 10 Snapdeal files
+- 10 Amazon files when Amazon is uploaded
+- 10 Meesho files when Meesho is uploaded
+- 10 Flipkart files when Flipkart is uploaded
+- 10 Snapdeal files when Snapdeal is uploaded
 
-The app is upload-first by design. One master uploader accepts all four platform Demo/Ready Excel files. Every platform accepts `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.xltx`, `.xltm`, or `.xlt`. Native OOXML files retain their format; legacy/binary files are converted to `.xlsx` compatibility copies with a review warning. Each workbook is inspected independently and never uses an older product workbook, a filename, or another platform's structure as a template.
+The app is upload-first by design. One master uploader accepts any subset of the four platform Demo/Ready Excel files, from one through four workbooks. Every platform accepts `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.xltx`, `.xltm`, or `.xlt`. Native OOXML files retain their format; legacy/binary files are converted to `.xlsx` compatibility copies with a review warning. Each workbook is inspected independently and never uses an older product workbook, a filename, or another platform's structure as a template.
 
 ## What it does
 
@@ -35,7 +35,7 @@ The application listens on Streamlit's default port `8501`. For the Arena previe
 streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
-Legacy `.xls`/`.xlt` and binary `.xlsb` files are accepted for all four portals. Because openpyxl cannot safely write those source formats, the app converts them to `.xlsx` before editing while carrying forward readable sheets and values (and common BIFF formatting where available). Generated files from those sources are `.xlsx`; review format-specific features manually. `.xlsx`, `.xlsm`, `.xltx`, and `.xltm` stay in their native OOXML format, including VBA preservation for macro-enabled files.
+Legacy `.xls`/`.xlt` and binary `.xlsb` files are accepted for each submitted portal. Because openpyxl cannot safely write those source formats, the app converts them to `.xlsx` before editing while carrying forward readable sheets and values (and common BIFF formatting where available). Generated files from those sources are `.xlsx`; review format-specific features manually. `.xlsx`, `.xlsm`, `.xltx`, and `.xltm` stay in their native OOXML format, including VBA preservation for macro-enabled files.
 
 ## Validation notes
 
