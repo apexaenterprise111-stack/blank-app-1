@@ -7,7 +7,7 @@ A Streamlit workspace for producing **40 separate, validated customer workbooks*
 - 10 Flipkart files
 - 10 Snapdeal files
 
-The app is upload-first by design. Each platform receives its own current Demo/Ready master (`.xlsx`/`.xlsm`; Flipkart also accepts legacy `.xls`). It inspects that workbook independently and never uses an older product workbook, a filename, or another platform's structure as a template.
+The app is upload-first by design. Every platform accepts the current Demo/Ready Excel master in `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.xltx`, `.xltm`, or `.xlt` format. Native OOXML files retain their format; legacy/binary files are converted to `.xlsx` compatibility copies with a review warning. Each workbook is inspected independently and never uses an older product workbook, a filename, or another platform's structure as a template.
 
 ## What it does
 
@@ -35,7 +35,7 @@ The application listens on Streamlit's default port `8501`. For the Arena previe
 streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
-Flipkart legacy `.xls` files are accepted. Because openpyxl cannot write the old BIFF format safely, the app converts `.xls` to `.xlsx` before editing while carrying forward values, sheets, merged cells, common formatting, widths/heights, and visibility. Generated Flipkart files from a `.xls` source are therefore `.xlsx`; review any legacy-only features manually.
+Legacy `.xls`/`.xlt` and binary `.xlsb` files are accepted for all four portals. Because openpyxl cannot safely write those source formats, the app converts them to `.xlsx` before editing while carrying forward readable sheets and values (and common BIFF formatting where available). Generated files from those sources are `.xlsx`; review format-specific features manually. `.xlsx`, `.xlsm`, `.xltx`, and `.xltm` stay in their native OOXML format, including VBA preservation for macro-enabled files.
 
 ## Validation notes
 

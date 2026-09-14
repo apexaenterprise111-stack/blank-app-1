@@ -28,6 +28,18 @@ from openpyxl.utils import get_column_letter
 
 
 PLATFORMS = ("Amazon", "Meesho", "Flipkart", "Snapdeal")
+NATIVE_WORKBOOK_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+LEGACY_BIFF_EXTENSIONS = {".xls", ".xlt"}
+BINARY_WORKBOOK_EXTENSIONS = {".xlsb"}
+SUPPORTED_WORKBOOK_EXTENSIONS = (
+    "xlsx",
+    "xlsm",
+    "xls",
+    "xlsb",
+    "xltx",
+    "xltm",
+    "xlt",
+)
 CONTENT_ROLES = {"title", "description", "keyword", "bullet"}
 
 # Header aliases are intentionally conservative.  A column that is not a
@@ -630,17 +642,78 @@ def _convert_xls_to_xlsx(data: bytes) -> bytes:
     return output.getvalue()
 
 
+def _convert_xlsb_to_xlsx(data: bytes, filename: str) -> bytes:
+    """Convert a binary .xlsb workbook to an editable .xlsx compatibility copy."""
+
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover - dependency is in requirements
+        raise ValueError(".xlsb support requires pandas.") from exc
+
+    try:
+        sheets = pd.read_excel(io.BytesIO(data), sheet_name=None, header=None, engine="pyxlsb")
+    except Exception as exc:
+        raise ValueError(
+            f"Could not read binary .xlsb workbook. Install/enable pyxlsb support: {exc}"
+        ) from exc
+
+    converted = Workbook()
+    converted.remove(converted.active)
+    used_names: set[str] = set()
+    for sheet_name, frame in sheets.items():
+        base_name = re.sub(r"[\\/*?:\[\]]", "_", str(sheet_name))[:31] or "Sheet"
+        name = base_name
+        suffix = 1
+        while name in used_names:
+            suffix += 1
+            name = f"{base_name[: max(1, 31 - len(str(suffix)) - 1)]}_{suffix}"
+        used_names.add(name)
+        worksheet = converted.create_sheet(name)
+        for row_number, row in enumerate(frame.itertuples(index=False, name=None), start=1):
+            for col_number, value in enumerate(row, start=1):
+                try:
+                    missing = bool(pd.isna(value))
+                except (TypeError, ValueError):
+                    missing = False
+                if missing:
+                    value = None
+                elif hasattr(value, "item"):
+                    try:
+                        value = value.item()
+                    except Exception:
+                        pass
+                worksheet.cell(row=row_number, column=col_number).value = value
+
+    output = io.BytesIO()
+    converted.save(output)
+    return output.getvalue()
+
+
+def _output_extension(filename: str) -> str:
+    extension = Path(filename).suffix.lower()
+    return extension if extension in NATIVE_WORKBOOK_EXTENSIONS else ".xlsx"
+
+
+def is_compatibility_workbook(filename: str) -> bool:
+    return Path(filename).suffix.lower() not in NATIVE_WORKBOOK_EXTENSIONS
+
+
 def open_source_workbook(data: bytes, filename: str):
     extension = Path(filename).suffix.lower()
-    if extension == ".xls":
+    if extension in LEGACY_BIFF_EXTENSIONS:
         data = _convert_xls_to_xlsx(data)
         extension = ".xlsx"
-    if extension not in {".xlsx", ".xlsm"}:
-        raise ValueError("Supported workbook formats are .xlsx, .xlsm, and legacy .xls (converted to .xlsx).")
+    elif extension in BINARY_WORKBOOK_EXTENSIONS:
+        data = _convert_xlsb_to_xlsx(data, filename)
+        extension = ".xlsx"
+    if extension not in NATIVE_WORKBOOK_EXTENSIONS:
+        raise ValueError(
+            "Supported workbook formats are .xlsx, .xlsm, .xltx, .xltm, .xls, .xlt, and .xlsb."
+        )
     return load_workbook(
         io.BytesIO(data),
         data_only=False,
-        keep_vba=extension == ".xlsm",
+        keep_vba=extension in {".xlsm", ".xltm"},
     )
 
 
@@ -657,9 +730,10 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "sheet_names": [ws.title for ws in wb.worksheets],
             "sheets": sheets,
             "recommended_sheet": recommended_sheet,
-            "macro_enabled": Path(filename).suffix.lower() == ".xlsm",
-            "legacy_xls_converted": Path(filename).suffix.lower() == ".xls",
-            "output_extension": ".xlsx" if Path(filename).suffix.lower() == ".xls" else Path(filename).suffix.lower(),
+            "macro_enabled": Path(filename).suffix.lower() in {".xlsm", ".xltm"},
+            "compatibility_mode": is_compatibility_workbook(filename),
+            "legacy_xls_converted": Path(filename).suffix.lower() in LEGACY_BIFF_EXTENSIONS,
+            "output_extension": _output_extension(filename),
             "error": None,
         }
     except Exception as exc:  # surfaced in the UI with the filename context
@@ -670,8 +744,9 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "sheets": [],
             "recommended_sheet": None,
             "macro_enabled": False,
-            "legacy_xls_converted": Path(filename).suffix.lower() == ".xls",
-            "output_extension": ".xlsx" if Path(filename).suffix.lower() == ".xls" else Path(filename).suffix.lower(),
+            "compatibility_mode": is_compatibility_workbook(filename),
+            "legacy_xls_converted": Path(filename).suffix.lower() in LEGACY_BIFF_EXTENSIONS,
+            "output_extension": _output_extension(filename),
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -838,7 +913,7 @@ def inspect_sku_source(
     if data:
         try:
             extension = Path(filename).suffix.lower()
-            if extension in {".xlsx", ".xlsm", ".xls"}:
+            if extension in NATIVE_WORKBOOK_EXTENSIONS | LEGACY_BIFF_EXTENSIONS | BINARY_WORKBOOK_EXTENSIONS:
                 file_values, file_duplicates = _extract_skus_from_workbook(data, filename)
             elif extension in {".csv", ".tsv"}:
                 file_values, file_duplicates = _extract_skus_from_csv_text(_decode_text(data))
@@ -915,7 +990,7 @@ def inspect_image_link_zip(data: bytes | None, filename: str = "") -> dict[str, 
                 raw = archive.read(info)
                 member_links: list[str] = []
                 kind = "binary"
-                if extension in {".xlsx", ".xlsm", ".xls"}:
+                if extension in NATIVE_WORKBOOK_EXTENSIONS | LEGACY_BIFF_EXTENSIONS | BINARY_WORKBOOK_EXTENSIONS:
                     kind = "workbook"
                     try:
                         member_links = _extract_urls_from_workbook_bytes(raw, member_name)
@@ -1865,10 +1940,9 @@ def _safe_filename_part(value: str) -> str:
 
 def customer_filename(platform: str, customer_number: int, source_filename: str) -> str:
     source = Path(source_filename)
-    extension = source.suffix.lower() if source.suffix.lower() in {".xlsx", ".xlsm"} else ".xlsx"
-    # Legacy BIFF files are accepted and converted to xlsx before editing.
-    if source.suffix.lower() == ".xls":
-        extension = ".xlsx"
+    # OOXML workbooks/templates retain their extension. Legacy BIFF and binary
+    # workbooks are converted to .xlsx before any editable copy is written.
+    extension = _output_extension(source_filename)
     stem = _safe_filename_part(source.stem)
     return f"{_safe_filename_part(platform)}_Customer_{customer_number:02d}_{stem}{extension}"
 
@@ -1886,9 +1960,9 @@ def generate_customer_workbook(
     filename = customer_filename(platform, customer_number, source_filename)
     warnings: list[str] = []
     errors: list[str] = []
-    if Path(source_filename).suffix.lower() == ".xls":
+    if is_compatibility_workbook(source_filename):
         warnings.append(
-            "Legacy .xls master accepted and converted to .xlsx for safe editing. Values, sheets, merged cells, and common formatting are carried forward; review legacy-only features manually."
+            f"{Path(source_filename).suffix.lower()} master accepted in compatibility mode and converted to .xlsx for safe editing. Values and readable sheets are carried forward; review format-specific features manually."
         )
     try:
         source_wb = open_source_workbook(source_data, source_filename)

@@ -15,6 +15,7 @@ import streamlit as st
 
 from listing_engine import (
     PLATFORMS,
+    SUPPORTED_WORKBOOK_EXTENSIONS,
     build_export_zip,
     build_manifest,
     format_external_validation_report,
@@ -143,9 +144,9 @@ def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) ->
             help="Only this sheet receives approved content edits. Every other sheet is preserved.",
         )
         selected = next(sheet for sheet in profile["sheets"] if sheet["name"] == chosen)
-        if uploaded.name.lower().endswith(".xls"):
+        if profile.get("compatibility_mode"):
             st.warning(
-                "Legacy .xls accepted. It will be converted to .xlsx for safe editing; review any legacy-only workbook features after export."
+                f"{uploaded.name} is accepted in compatibility mode. It will be converted to .xlsx for safe editing; review format-specific features after export."
             )
         identity = ", ".join(selected.get("product_identities", [])) or "Not detected"
         content = ", ".join(selected.get("content_fields", [])) or "None detected"
@@ -246,11 +247,11 @@ card_columns = st.columns(2)
 for index, platform in enumerate(PLATFORMS):
     with card_columns[index % 2]:
         st.markdown(f'<div class="upload-card"><span class="platform-chip">{platform}</span><h4>Current {platform} master</h4>', unsafe_allow_html=True)
-        accepted_types = ["xlsx", "xlsm"]
-        upload_help = "Accepted formats: .xlsx and .xlsm."
-        if platform == "Flipkart":
-            accepted_types.append("xls")
-            upload_help = "Flipkart .xls, .xlsx, and .xlsm are accepted. Legacy .xls files are converted to .xlsx for safe editing."
+        accepted_types = list(SUPPORTED_WORKBOOK_EXTENSIONS)
+        upload_help = (
+            "Accepted Excel formats: .xlsx, .xlsm, .xls, .xlsb, .xltx, .xltm, and .xlt. "
+            "Legacy/binary formats are converted to .xlsx compatibility copies for safe editing."
+        )
         uploads[platform] = st.file_uploader(
             f"Upload {platform} workbook",
             type=accepted_types,
@@ -277,9 +278,9 @@ with reference_columns[0]:
     st.markdown("**SKU input**")
     sku_upload = st.file_uploader(
         "SKU file",
-        type=["xlsx", "xlsm", "xls", "csv", "tsv", "txt"],
+        type=list(SUPPORTED_WORKBOOK_EXTENSIONS) + ["csv", "tsv", "txt"],
         key="sku_input_file",
-        help="Upload a SKU workbook/CSV/TXT, including legacy .xls, or paste one SKU per line below.",
+        help="Upload a SKU workbook/CSV/TXT in any supported Excel format, or paste one SKU per line below.",
     )
     pasted_skus = st.text_area(
         "Paste SKU values",
