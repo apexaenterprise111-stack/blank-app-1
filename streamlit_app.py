@@ -20,6 +20,7 @@ from listing_engine import (
     build_manifest,
     format_external_validation_report,
     generate_customer_workbook,
+    inspect_image_link_source,
     inspect_sku_source,
     inspect_workbook,
     validate_external_inputs,
@@ -124,14 +125,20 @@ def _automatic_master_mapping(files: list[Any]) -> tuple[dict[str, int], list[st
 
     if len(files) != 4:
         return {}, list(PLATFORMS), None
-    names = [str(file.name).casefold() for file in files]
+    names = [str(file.name).casefold().replace("_", " ").replace("-", " ") for file in files]
+    aliases = {
+        "Amazon": ("amazon", "amz"),
+        "Meesho": ("meesho",),
+        "Flipkart": ("flipkart", "flip kart"),
+        "Snapdeal": ("snapdeal", "snap deal", "snapdeal ready"),
+    }
     mapping: dict[str, int] = {}
     used: set[int] = set()
     for platform in PLATFORMS:
         candidates = [
             index
             for index, name in enumerate(names)
-            if index not in used and platform.casefold() in name
+            if index not in used and any(alias in name for alias in aliases[platform])
         ]
         if len(candidates) == 1:
             mapping[platform] = candidates[0]
@@ -230,14 +237,14 @@ def _render_sidebar() -> tuple[str, bool, str]:
         st.caption("4 platforms · 10 customer versions · one protected master per platform")
         st.divider()
         st.markdown("**Workflow**")
-        st.markdown("1. Upload four current master workbooks  \n2. Add the SKU input  \n3. Inspect each detected structure and locked image URLs  \n4. Generate and validate 40 copies  \n5. Download the ZIP and QA manifest")
+        st.markdown("1. Upload four current master workbooks  \n2. Add the SKU and image-link inputs  \n3. Inspect each detected structure and locked data  \n4. Generate and validate 40 copies  \n5. Download the ZIP and QA manifest")
         st.divider()
         st.markdown("**Strict master safeguards**")
         st.checkbox("Fail closed if locked data changes", value=True, disabled=True)
         st.checkbox("Preserve .xlsm format and VBA", value=True, disabled=True)
         st.checkbox("Keep source images and URLs unchanged", value=True, disabled=True)
         st.checkbox("Use SKU input for validation only", value=True, disabled=True)
-        st.checkbox("Use master image URLs only", value=True, disabled=True)
+        st.checkbox("Keep image URLs/order unchanged", value=True, disabled=True)
         st.divider()
         st.caption("No old product template is used. Each platform is inspected independently from the file you upload.")
     with st.expander("Optional confirmed facts", expanded=False):
@@ -341,7 +348,7 @@ metric_columns[3].metric("Locked by default", "All other fields")
 
 st.markdown('<div class="section-label">01A · Add locked reference inputs</div>', unsafe_allow_html=True)
 st.markdown(
-    '<p class="section-note">Provide the SKU source in the single SKU box. Image URLs are read directly from each current Demo/Ready Excel and remain fully locked; there are no separate image-link boxes.</p>',
+    '<p class="section-note">Provide the SKU source and one image-link file. Both are locked reference inputs; existing SKU values and master image URLs are never overwritten.</p>',
     unsafe_allow_html=True,
 )
 st.markdown("**SKU input · one box**")
@@ -366,9 +373,30 @@ else:
     for error in sku_input.get("errors", []):
         st.error(error)
 
+st.markdown("**Image-link input · one upload box**")
+image_link_source = st.file_uploader(
+    "Upload image-link file",
+    type=None,
+    key="image_link_source",
+    help="Upload one image-link file in any format. The tool extracts readable HTTP/HTTPS links from text, Excel, ZIP, JSON, PDF, DOCX, or other files.",
+)
+image_input = inspect_image_link_source(
+    image_link_source.getvalue() if image_link_source else None,
+    image_link_source.name if image_link_source else "",
+)
+if image_input.get("ok"):
+    st.success(f"Image links ready · {image_input.get('link_count', 0)} unique link(s)")
+else:
+    st.info("Image-link input pending · upload one file containing readable image URLs")
+    for error in image_input.get("errors", []):
+        st.error(error)
+
 # Clear old output when any source workbook changes.
 signature = tuple((platform, _source_signature(uploads[platform])) for platform in PLATFORMS)
-reference_signature = (hashlib.sha256((pasted_skus or "").encode("utf-8")).hexdigest()[:16],)
+reference_signature = (
+    hashlib.sha256((pasted_skus or "").encode("utf-8")).hexdigest()[:16],
+    _source_signature(image_link_source),
+)
 if st.session_state.get("source_signature") != signature:
     st.session_state["source_signature"] = signature
     st.session_state.pop("generation_results", None)
@@ -397,7 +425,7 @@ else:
     st.markdown('<p class="section-note">Nothing is generated until all four current Demo/Ready workbooks are present and inspectable.</p>', unsafe_allow_html=True)
 
 external_report: dict[str, Any] = {}
-external_sources_ready = bool(sku_input.get("ok"))
+external_sources_ready = bool(sku_input.get("ok") and image_input.get("ok"))
 if external_sources_ready and len(chosen_sheets) == 4 and all(chosen_sheets.get(platform) for platform in PLATFORMS):
     external_report = validate_external_inputs(
         {
@@ -409,7 +437,7 @@ if external_sources_ready and len(chosen_sheets) == 4 and all(chosen_sheets.get(
             for platform in PLATFORMS
         },
         sku_input["values"],
-        [],
+        image_input["links"],
     )
     with st.expander("Reference-input and locked-image cross-check", expanded=True):
         st.caption("The supplied SKU list is checked against each master. Image URLs are counted from the locked master Excel only and are never replaced.")
@@ -462,7 +490,7 @@ ready = (
 if invalid_profiles:
     st.warning("Fix the workbook inspection errors before generating: " + ", ".join(invalid_profiles) + ".")
 if not external_sources_ready:
-    st.info("Enter at least one SKU in the SKU box before generating. Image URLs are taken directly from the locked master Excel files.")
+    st.info("Enter SKU values and upload one image-link file before generating. Both inputs are checked without overwriting locked master data.")
 elif external_report and not external_report.get("ok"):
     st.error("Reference-input validation could not complete. Fix the reported input error before generating.")
 

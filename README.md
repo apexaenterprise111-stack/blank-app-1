@@ -12,7 +12,7 @@ The app is upload-first by design. One master uploader accepts all four platform
 ## What it does
 
 1. **Inspects before editing** — sheet names, header row, product identity, groups, content columns, formulas, merged ranges, and data-validation counts are shown before generation.
-2. **Accepts locked reference inputs** — enter one or more SKUs in the single SKU input box. Image URLs are read directly from each current master Excel; there is no separate image-link box, so existing image URLs and their order remain the only image source of truth.
+2. **Accepts locked reference inputs** — enter one or more SKUs in the single SKU input box and upload one image-link file in the single image-link box. The image file is cross-checked only; existing master image URLs and their order remain locked and are never overwritten.
 3. **Writes only approved listing fields** — detected Title, Description, Keyword/Search Keyword, and Bullet columns. Unrecognized columns are treated as locked.
 4. **Keeps master data protected** — price fields, images/image URLs, SKUs, IDs, size/color/pack/variation data, brand, style codes, formulas, dropdowns, sheet names, and formatting are not regenerated. The external SKU input is validation-only and is never copied over existing cells.
 5. **Normalizes group order safely** — numeric groups are kept together; Amazon parent/child rows remain together. Embedded-image or merged-body layouts are not reordered when doing so could break image mapping; the app reports that manual review is needed.
