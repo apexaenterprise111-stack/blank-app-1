@@ -101,6 +101,30 @@ class ListingEngineTests(unittest.TestCase):
         output = load_workbook(BytesIO(result.data))
         self.assertNotIn("KSHTABHANJAN", output["Flipkart"]["D2"].value.upper())
 
+    def test_invalid_xml_control_char_is_sanitized_for_flipkart_template(self):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Flipkart"
+        sheet.append(["Group ID", "SKU", "Product Name", "Description", "Title"])
+        sheet.append(["1", "SKU-1", "PRODUCT", "Proc SLA - pick and pack", ""])
+        source = BytesIO()
+        workbook.save(source)
+
+        corrupted = BytesIO()
+        with ZipFile(BytesIO(source.getvalue())) as input_zip, ZipFile(corrupted, "w", ZIP_DEFLATED) as output_zip:
+            for info in input_zip.infolist():
+                value = input_zip.read(info)
+                if info.filename.endswith(".xml"):
+                    value = value.replace(b"pick and pack", b"pick and pack.\x0bProc SLA")
+                output_zip.writestr(info, value)
+
+        profile = inspect_workbook(corrupted.getvalue(), "flipkart.xlsx")
+        self.assertIsNone(profile["error"])
+        self.assertTrue(profile["xml_sanitized"])
+        result = generate_customer_workbook(corrupted.getvalue(), "flipkart.xlsx", "Flipkart", 1, "Flipkart")
+        self.assertTrue(result.success, result.errors)
+        self.assertTrue(result.report["source_xml_sanitized"])
+
     def test_external_sku_and_image_zip_are_validation_only(self):
         source = self.master_bytes()
         sku_input = inspect_sku_source(pasted_text="P1\nC1")

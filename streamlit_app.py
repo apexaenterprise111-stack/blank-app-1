@@ -148,6 +148,10 @@ def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) ->
             st.warning(
                 f"{uploaded.name} is accepted in compatibility mode. It will be converted to .xlsx for safe editing; review format-specific features after export."
             )
+        if profile.get("xml_sanitized"):
+            st.warning(
+                f"This workbook contains {profile.get('xml_sanitized_count', 0)} invalid XML control character(s). They are normalized to spaces only so the workbook can be opened; review the affected text after export."
+            )
         identity = ", ".join(selected.get("product_identities", [])) or "Not detected"
         content = ", ".join(selected.get("content_fields", [])) or "None detected"
         groups = ", ".join(selected.get("group_values", [])[:8]) or "Not detected"

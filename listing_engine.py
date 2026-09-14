@@ -642,6 +642,47 @@ def _convert_xls_to_xlsx(data: bytes) -> bytes:
     return output.getvalue()
 
 
+_ILLEGAL_XML_BYTES_RE = re.compile(rb"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
+def _sanitize_ooxml_workbook(data: bytes, filename: str) -> tuple[bytes, dict[str, Any]]:
+    """Remove invalid XML 1.0 control bytes from OOXML text parts.
+
+    A few marketplace templates contain a literal vertical-tab/control byte in
+    a cell note or long description.  Excel may still open those files, but
+    openpyxl correctly rejects them with IllegalCharacterError.  Replacing only
+    invalid XML control bytes with a space lets the workbook be inspected and
+    edited while preserving all valid text, workbook parts, and VBA binaries.
+    The caller surfaces the replacement count as a compatibility warning.
+    """
+
+    extension = Path(filename).suffix.lower()
+    report = {"changed": False, "removed_count": 0, "members": []}
+    if extension not in NATIVE_WORKBOOK_EXTENSIONS or not zipfile.is_zipfile(io.BytesIO(data)):
+        return data, report
+
+    output = io.BytesIO()
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as source_archive, zipfile.ZipFile(
+            output, "w", compression=zipfile.ZIP_DEFLATED
+        ) as target_archive:
+            for info in source_archive.infolist():
+                raw = source_archive.read(info)
+                member_extension = Path(info.filename).suffix.lower()
+                cleaned = raw
+                removed = 0
+                if member_extension in {".xml", ".rels"}:
+                    cleaned, removed = _ILLEGAL_XML_BYTES_RE.subn(b" ", raw)
+                if removed:
+                    report["changed"] = True
+                    report["removed_count"] += removed
+                    report["members"].append(info.filename)
+                target_archive.writestr(info, cleaned)
+    except (zipfile.BadZipFile, OSError):
+        return data, report
+    return (output.getvalue() if report["changed"] else data), report
+
+
 def _convert_xlsb_to_xlsx(data: bytes, filename: str) -> bytes:
     """Convert a binary .xlsb workbook to an editable .xlsx compatibility copy."""
 
@@ -699,6 +740,7 @@ def is_compatibility_workbook(filename: str) -> bool:
 
 
 def open_source_workbook(data: bytes, filename: str):
+    data, _ = _sanitize_ooxml_workbook(data, filename)
     extension = Path(filename).suffix.lower()
     if extension in LEGACY_BIFF_EXTENSIONS:
         data = _convert_xls_to_xlsx(data)
@@ -721,7 +763,8 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
     """Return a serializable inspection summary without modifying the file."""
 
     try:
-        wb = open_source_workbook(data, filename)
+        safe_data, sanitation = _sanitize_ooxml_workbook(data, filename)
+        wb = open_source_workbook(safe_data, filename)
         sheets = [_sheet_profile(ws) for ws in wb.worksheets]
         recommended_sheet = next((sheet["name"] for sheet in sheets if sheet["recommended"]), None)
         return {
@@ -733,6 +776,9 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "macro_enabled": Path(filename).suffix.lower() in {".xlsm", ".xltm"},
             "compatibility_mode": is_compatibility_workbook(filename),
             "legacy_xls_converted": Path(filename).suffix.lower() in LEGACY_BIFF_EXTENSIONS,
+            "xml_sanitized": sanitation.get("changed", False),
+            "xml_sanitized_count": sanitation.get("removed_count", 0),
+            "xml_sanitized_members": sanitation.get("members", []),
             "output_extension": _output_extension(filename),
             "error": None,
         }
@@ -746,6 +792,9 @@ def inspect_workbook(data: bytes, filename: str) -> dict[str, Any]:
             "macro_enabled": False,
             "compatibility_mode": is_compatibility_workbook(filename),
             "legacy_xls_converted": Path(filename).suffix.lower() in LEGACY_BIFF_EXTENSIONS,
+            "xml_sanitized": False,
+            "xml_sanitized_count": 0,
+            "xml_sanitized_members": [],
             "output_extension": _output_extension(filename),
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -1965,7 +2014,12 @@ def generate_customer_workbook(
             f"{Path(source_filename).suffix.lower()} master accepted in compatibility mode and converted to .xlsx for safe editing. Values and readable sheets are carried forward; review format-specific features manually."
         )
     try:
-        source_wb = open_source_workbook(source_data, source_filename)
+        safe_source_data, sanitation = _sanitize_ooxml_workbook(source_data, source_filename)
+        if sanitation.get("changed"):
+            warnings.append(
+                f"Invalid XML control characters were replaced with spaces in {sanitation.get('removed_count', 0)} cell-text byte(s) so the workbook could be opened. Review members: {', '.join(sanitation.get('members', [])[:5])}."
+            )
+        source_wb = open_source_workbook(safe_source_data, source_filename)
         selected_name = sheet_name or source_wb.active.title
         if selected_name not in source_wb.sheetnames:
             raise ValueError(f"Data sheet '{selected_name}' was not found in the current workbook.")
@@ -2054,6 +2108,8 @@ def generate_customer_workbook(
                 "platform": platform,
                 "source_filename": source_filename,
                 "source_extension": Path(source_filename).suffix.lower(),
+                "source_xml_sanitized": sanitation.get("changed", False),
+                "source_xml_sanitized_count": sanitation.get("removed_count", 0),
                 "output_filename": filename,
                 "data_sheet": selected_name,
                 "header_row": check_output_header,
