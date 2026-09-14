@@ -12,7 +12,7 @@ The app is upload-first by design. Every platform accepts the current Demo/Ready
 ## What it does
 
 1. **Inspects before editing** — sheet names, header row, product identity, groups, content columns, formulas, merged ranges, and data-validation counts are shown before generation.
-2. **Accepts locked reference inputs** — upload a SKU workbook/CSV/TXT or paste SKUs, then upload a ZIP containing image-link text/CSV/JSON files or a workbook of links. The tool cross-checks both inputs against every platform master.
+2. **Accepts locked reference inputs** — upload a SKU workbook/CSV/TXT or paste SKUs, then use one image-link input box to upload any file or paste URLs. TXT, CSV, Excel, ZIP, PDF, DOCX, JSON, and other files are scanned for readable HTTP links. The tool cross-checks both inputs against every platform master.
 3. **Writes only approved listing fields** — detected Title, Description, Keyword/Search Keyword, and Bullet columns. Unrecognized columns are treated as locked.
 4. **Keeps master data protected** — price fields, images/image URLs, SKUs, IDs, size/color/pack/variation data, brand, style codes, formulas, dropdowns, sheet names, and formatting are not regenerated. External SKU/image inputs are validation-only and are never copied over existing cells.
 5. **Normalizes group order safely** — numeric groups are kept together; Amazon parent/child rows remain together. Embedded-image or merged-body layouts are not reordered when doing so could break image mapping; the app reports that manual review is needed.

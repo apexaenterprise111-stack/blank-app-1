@@ -7,6 +7,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from listing_engine import (
     generate_customer_workbook,
+    inspect_image_link_source,
     inspect_image_link_zip,
     inspect_sku_source,
     inspect_workbook,
@@ -136,6 +137,14 @@ class ListingEngineTests(unittest.TestCase):
         image_input = inspect_image_link_zip(image_zip.getvalue(), "links.zip")
         self.assertTrue(image_input["ok"])
         self.assertEqual(image_input["link_count"], 2)
+
+        universal_input = inspect_image_link_source(
+            b"not really a text extension: https://example/3.jpg",
+            "links.anything",
+            pasted_text="https://example/4.jpg",
+        )
+        self.assertTrue(universal_input["ok"])
+        self.assertEqual(universal_input["link_count"], 2)
 
         report = validate_external_inputs(
             {

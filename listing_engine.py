@@ -1098,6 +1098,67 @@ def inspect_image_link_zip(data: bytes | None, filename: str = "") -> dict[str, 
         }
 
 
+def inspect_image_link_source(
+    data: bytes | None = None,
+    filename: str = "",
+    pasted_text: str = "",
+) -> dict[str, Any]:
+    """Accept one uploaded file in any format plus optional pasted URLs.
+
+    The source may be a ZIP, workbook, CSV/TXT/JSON, PDF/DOCX-like binary, or
+    another file containing readable HTTP URLs.  URL extraction is read-only;
+    the links are never written into a marketplace workbook.
+    """
+
+    pasted_links = _extract_urls(pasted_text or "")
+    upload_links: list[str] = []
+    members: list[dict[str, Any]] = []
+    image_file_count = 0
+    errors: list[str] = []
+    source_kind = "paste only" if not data else "file + paste"
+
+    if data:
+        extension = Path(filename).suffix.lower()
+        try:
+            if extension in NATIVE_WORKBOOK_EXTENSIONS | LEGACY_BIFF_EXTENSIONS | BINARY_WORKBOOK_EXTENSIONS:
+                source_kind = "Excel + paste"
+                upload_links = _extract_urls_from_workbook_bytes(data, filename)
+            elif zipfile.is_zipfile(io.BytesIO(data)):
+                source_kind = "ZIP + paste"
+                zip_result = inspect_image_link_zip(data, filename)
+                upload_links = list(zip_result.get("links", []))
+                members = list(zip_result.get("members", []))
+                image_file_count = int(zip_result.get("image_file_count", 0))
+                if zip_result.get("error"):
+                    errors.append(str(zip_result["error"]))
+            else:
+                source_kind = "file text/binary + paste"
+                # URL characters are ASCII and survive both normal text
+                # decoding and a latin-1 fallback for PDF/DOCX/binary files.
+                upload_links = _extract_urls(_decode_text(data))
+                if not upload_links:
+                    upload_links = _extract_urls(data.decode("latin-1", errors="ignore"))
+                if Path(filename).suffix.lower() in _IMAGE_MEMBER_EXTENSIONS:
+                    image_file_count = 1
+        except Exception as exc:
+            errors.append(f"Could not read image-link source: {type(exc).__name__}: {exc}")
+
+    links = list(dict.fromkeys(upload_links + pasted_links))
+    return {
+        "filename": filename or "Pasted image links",
+        "links": links,
+        "link_count": len(links),
+        "paste_link_count": len(pasted_links),
+        "upload_link_count": len(upload_links),
+        "members": members,
+        "image_file_count": image_file_count,
+        "source_kind": source_kind,
+        "errors": errors,
+        "error": "; ".join(errors) if errors else None,
+        "ok": bool(links) and not errors,
+    }
+
+
 def _workbook_locked_inputs(
     data: bytes,
     filename: str,
@@ -1225,7 +1286,7 @@ def format_external_validation_report(report: Mapping[str, Any]) -> str:
         "Marketplace Listing Studio — external input validation",
         "",
         "SKU input is validation-only; no SKU cells are overwritten.",
-        "Image-link ZIP input is validation-only; no image URL or order is overwritten.",
+        "Image-link upload/paste input is validation-only; no image URL or order is overwritten.",
         f"Supplied unique SKUs: {report.get('sku_input_count', 0)}",
         f"Supplied unique image links: {report.get('image_input_count', 0)}",
         "",
