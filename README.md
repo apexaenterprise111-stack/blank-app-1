@@ -7,7 +7,7 @@ A Streamlit workspace for producing **40 separate, validated customer workbooks*
 - 10 Flipkart files
 - 10 Snapdeal files
 
-The app is upload-first by design. Every platform accepts the current Demo/Ready Excel master in `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.xltx`, `.xltm`, or `.xlt` format. Native OOXML files retain their format; legacy/binary files are converted to `.xlsx` compatibility copies with a review warning. Each workbook is inspected independently and never uses an older product workbook, a filename, or another platform's structure as a template.
+The app is upload-first by design. One master uploader accepts all four platform Demo/Ready Excel files. Every platform accepts `.xlsx`, `.xlsm`, `.xls`, `.xlsb`, `.xltx`, `.xltm`, or `.xlt`. Native OOXML files retain their format; legacy/binary files are converted to `.xlsx` compatibility copies with a review warning. Each workbook is inspected independently and never uses an older product workbook, a filename, or another platform's structure as a template.
 
 ## What it does
 

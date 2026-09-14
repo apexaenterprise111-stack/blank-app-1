@@ -120,6 +120,31 @@ def _sheet_option(profile: dict[str, Any]) -> tuple[list[str], str | None]:
     return names, profile.get("recommended_sheet") or (names[0] if names else None)
 
 
+def _automatic_master_mapping(files: list[Any]) -> tuple[dict[str, int], list[str], str | None]:
+    """Infer platform files from names, leaving ambiguous files selectable."""
+
+    if len(files) != 4:
+        return {}, list(PLATFORMS), None
+    names = [str(file.name).casefold() for file in files]
+    mapping: dict[str, int] = {}
+    used: set[int] = set()
+    for platform in PLATFORMS:
+        candidates = [
+            index
+            for index, name in enumerate(names)
+            if index not in used and platform.casefold() in name
+        ]
+        if len(candidates) == 1:
+            mapping[platform] = candidates[0]
+            used.add(candidates[0])
+    unresolved = [platform for platform in PLATFORMS if platform not in mapping]
+    if not mapping and len(files) == 4:
+        # If all four files have generic names, use the upload order as a
+        # usable default and show the operator the resulting mapping.
+        return dict(zip(PLATFORMS, range(4))), [], "No platform names were found; upload order was used: Amazon, Meesho, Flipkart, Snapdeal."
+    return mapping, unresolved, None
+
+
 def _render_inspection(platform: str, uploaded: Any, profile: dict[str, Any]) -> str | None:
     """Render one workbook's inspection and return the chosen data sheet."""
 
@@ -242,32 +267,66 @@ st.markdown(
 )
 
 st.markdown(
-    '<div class="rule-card"><strong>Current Excel first.</strong> Upload the current Demo/Ready workbook for each platform. The app reads its product identity, sheet names, headers, dropdowns, groups, variations, and locked data before writing only detected Title, Description, Keyword, and Bullet fields.</div>',
+    '<div class="rule-card"><strong>Current Excel first.</strong> Upload all four current Demo/Ready workbooks in the single master input box. The app reads each product identity, sheet names, headers, dropdowns, groups, variations, and locked data before writing only detected Title, Description, Keyword, and Bullet fields.</div>',
     unsafe_allow_html=True,
 )
 
-uploads: dict[str, Any] = {}
-card_columns = st.columns(2)
-for index, platform in enumerate(PLATFORMS):
-    with card_columns[index % 2]:
-        st.markdown(f'<div class="upload-card"><span class="platform-chip">{platform}</span><h4>Current {platform} master</h4>', unsafe_allow_html=True)
-        accepted_types = list(SUPPORTED_WORKBOOK_EXTENSIONS)
-        upload_help = (
-            "Accepted Excel formats: .xlsx, .xlsm, .xls, .xlsb, .xltx, .xltm, and .xlt. "
-            "Legacy/binary formats are converted to .xlsx compatibility copies for safe editing."
-        )
-        uploads[platform] = st.file_uploader(
-            f"Upload {platform} workbook",
-            type=accepted_types,
-            key=f"upload_{platform}",
-            label_visibility="collapsed",
-            help=upload_help,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+st.markdown("**Demo Excel input · one upload box for all four portals**")
+master_files = st.file_uploader(
+    "Upload Amazon, Meesho, Flipkart, and Snapdeal Demo/Ready Excel files",
+    type=list(SUPPORTED_WORKBOOK_EXTENSIONS),
+    accept_multiple_files=True,
+    key="all_master_workbooks",
+    help="Select all four platform workbooks in this one box. Platform names are detected from filenames; if names are generic, upload order is used or you can map them below.",
+)
+uploads: dict[str, Any] = {platform: None for platform in PLATFORMS}
+master_mapping_ready = len(master_files) == 4
+if not master_files:
+    st.info("Upload exactly four Demo/Ready Excel files in the single master input box.")
+elif len(master_files) != 4:
+    master_mapping_ready = False
+    st.warning(f"{len(master_files)} master file(s) uploaded. Exactly 4 are required: Amazon, Meesho, Flipkart, and Snapdeal.")
+else:
+    automatic_mapping, unresolved_platforms, mapping_note = _automatic_master_mapping(master_files)
+    if mapping_note:
+        st.info(mapping_note)
+    for platform, index in automatic_mapping.items():
+        uploads[platform] = master_files[index]
+    if unresolved_platforms:
+        st.warning("Some filenames do not identify their platform. Confirm the mapping before generating.")
+        available_options = {
+            index: f"{index + 1}. {file.name}"
+            for index, file in enumerate(master_files)
+        }
+        chosen_indices = set(automatic_mapping.values())
+        for platform in unresolved_platforms:
+            choices = [
+                (index, label)
+                for index, label in available_options.items()
+                if index not in chosen_indices
+            ]
+            labels = ["Select a Demo/Ready workbook"] + [label for _, label in choices]
+            selected_label = st.selectbox(
+                f"{platform} workbook",
+                labels,
+                key=f"master_mapping_{platform}",
+            )
+            if selected_label != labels[0]:
+                selected_index = next(index for index, label in choices if label == selected_label)
+                uploads[platform] = master_files[selected_index]
+                chosen_indices.add(selected_index)
+            else:
+                master_mapping_ready = False
+    mapping_rows = [
+        {"Portal": platform, "Selected master": uploads[platform].name if uploads[platform] else "Not mapped"}
+        for platform in PLATFORMS
+    ]
+    st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
+    master_mapping_ready = master_mapping_ready and all(uploads.values())
 
 loaded = sum(upload is not None for upload in uploads.values())
 metric_columns = st.columns(4)
-metric_columns[0].metric("Masters loaded", f"{loaded}/4")
+metric_columns[0].metric("Masters mapped", f"{loaded}/4")
 metric_columns[1].metric("Customer files", "40")
 metric_columns[2].metric("Per platform", "10")
 metric_columns[3].metric("Locked by default", "All other fields")
@@ -427,7 +486,8 @@ st.markdown('<p class="section-note">Every customer copy is re-opened after savi
 
 invalid_profiles = [platform for platform, profile in profiles.items() if profile.get("error")]
 ready = (
-    loaded == 4
+    master_mapping_ready
+    and loaded == 4
     and len(profiles) == 4
     and not invalid_profiles
     and all(chosen_sheets.get(platform) for platform in PLATFORMS)
