@@ -344,19 +344,20 @@ st.markdown(
     '<p class="section-note">Provide the SKU source in the single SKU box. Image URLs are read directly from each current Demo/Ready Excel and remain fully locked; there are no separate image-link boxes.</p>',
     unsafe_allow_html=True,
 )
-st.markdown("**SKU input · one upload box**")
-sku_upload = st.file_uploader(
-    "Upload SKU source",
-    type=list(SUPPORTED_WORKBOOK_EXTENSIONS) + ["csv", "tsv", "txt"],
-    key="sku_input_file",
-    help="Upload one SKU Excel/CSV/TXT file in this single box. If you have pasted SKU values, save them as TXT or CSV first.",
+st.markdown("**SKU input · one box**")
+pasted_skus = st.text_area(
+    "Enter SKU values",
+    key="pasted_sku_values",
+    placeholder="Paste one SKU per line, or separate multiple SKUs with commas",
+    height=130,
+    help="Enter the SKU values that should be checked against the four master workbooks.",
 )
 st.caption("SKU is used for validation only. Existing SKU cells and image URLs from the master Excel are never overwritten.")
 
 sku_input = inspect_sku_source(
-    sku_upload.getvalue() if sku_upload else None,
-    sku_upload.name if sku_upload else "",
-    pasted_text="",
+    data=None,
+    filename="",
+    pasted_text=pasted_skus,
 )
 if sku_input.get("ok"):
     st.success(f"SKU input ready · {sku_input['count']} unique SKU(s)")
@@ -367,7 +368,7 @@ else:
 
 # Clear old output when any source workbook changes.
 signature = tuple((platform, _source_signature(uploads[platform])) for platform in PLATFORMS)
-reference_signature = (_source_signature(sku_upload),)
+reference_signature = (hashlib.sha256((pasted_skus or "").encode("utf-8")).hexdigest()[:16],)
 if st.session_state.get("source_signature") != signature:
     st.session_state["source_signature"] = signature
     st.session_state.pop("generation_results", None)
@@ -461,7 +462,7 @@ ready = (
 if invalid_profiles:
     st.warning("Fix the workbook inspection errors before generating: " + ", ".join(invalid_profiles) + ".")
 if not external_sources_ready:
-    st.info("Upload a SKU source before generating. Image URLs are taken directly from the locked master Excel files.")
+    st.info("Enter at least one SKU in the SKU box before generating. Image URLs are taken directly from the locked master Excel files.")
 elif external_report and not external_report.get("ok"):
     st.error("Reference-input validation could not complete. Fix the reported input error before generating.")
 
